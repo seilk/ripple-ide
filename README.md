@@ -143,6 +143,14 @@ suggestion again with no request while you type through it; waits 75 ms, and
 not at all right after an accept; and edits with `edit_file`, which sends the
 changed text only.
 
+Three more, checked for what they send but not yet timed against a live Ripple:
+the suggestion request puts the text after the cursor ahead of the text before
+it, so a new line leaves everything else in the server's prefix cache; the
+suggestion requests share one open connection to the Ripple server instead of
+opening one each; and the agent keeps the name of the open file out of its
+system prompt and sends it with each user message, so a chat stays cached when
+the editor moves to another file.
+
 `tests/e2e/real.mjs` runs these flows in a browser against a live server, and
 `tools/bench-cli.mjs` runs the suggestion cases from a terminal.
 

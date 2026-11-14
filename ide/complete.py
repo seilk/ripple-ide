@@ -15,6 +15,9 @@ of that line. The mock endpoint answers from a small idiom table instead.
 
 The context window moves in steps (`stable_window`), so the prompt keeps the same
 start from one keystroke to the next and the server can reuse its prefix cache.
+For the same reason the request is ordered by how often each part changes
+(`_user_text`): the text after the cursor, which stays as it is while you type,
+comes before the text in front of the cursor, which grows at its end.
 """
 
 from __future__ import annotations
@@ -119,14 +122,27 @@ def parse_request(body: dict) -> CompletionRequest:
     )
 
 
-def build_messages(req: CompletionRequest) -> list[dict]:
+def _user_text(req: CompletionRequest, before: str, task: str) -> str:
+    """The request text, with the parts that change least first.
+
+    The server's prefix cache covers a request up to the first character that differs
+    from the one before. Typing adds text at the end of `before` and leaves the text
+    after the cursor alone, so the text after the cursor goes first: a new line then
+    costs the new line, not the new line plus everything after the cursor again.
+    The compile findings change on their own schedule, so they go last.
+    """
     notes = "".join(f"- {finding}\n" for finding in req.findings)
-    user = (
-        f"File: {req.path or 'kernel'} ({req.language})\n"
+    return (
+        f"File: {req.path or 'file'} ({req.language})\n"
+        f"<after_cursor>\n{req.suffix}</after_cursor>\n<before_cursor>\n{before}</before_cursor>\n"
         + (f"Findings from the last compile:\n{notes}" if notes else "")
-        + f"<before_cursor>\n{req.prefix}</before_cursor>\n<after_cursor>\n{req.suffix}</after_cursor>\n"
-        "Write the text that belongs at the cursor."
+        + task
     )
+
+
+def build_messages(req: CompletionRequest) -> list[dict]:
+    user = _user_text(req, req.prefix, "The cursor is at the end of before_cursor, and after_cursor follows it. "
+                                       "Write the text that belongs at the cursor.")
     system = SYSTEM_PROMPT + (KERNEL_RULES if req.language in KERNEL_LANGUAGES else "")
     if req.system_extra.strip():
         system += " " + req.system_extra.strip()
@@ -187,19 +203,15 @@ def plan_prefill(req: CompletionRequest) -> PrefillPlan:
     word = PARTIAL_WORD_RE.search(line) if mid_line else None
     typed_word = word.group(0) if word else ""
     start = line[: len(line) - len(typed_word)].rstrip(" \t") if mid_line else ""
-    notes = "".join(f"- {finding}\n" for finding in req.findings)
-    task = ("The cursor is on a new line between the two parts. Your reply starts with that line as far as it "
-            "is typed. Continue it and stop at its end."
-            if mid_line else "Write the lines that belong between the two parts. Stop when the statement or block is complete.")
+    task = ("The cursor is on a new line at the end of before_cursor, and after_cursor follows it. Your reply starts "
+            "with that line as far as it is typed. Continue it and stop at its end."
+            if mid_line else "Write the lines that belong at the end of before_cursor, ahead of after_cursor. "
+                             "Stop when the statement or block is complete.")
     # The current line is left out of the request text. With it in, the model copied the
     # closing tag that came after it. Without it, the request also stays the same for a
     # whole line of typing, so the server's prefix cache covers all of it.
     before = req.prefix[: len(req.prefix) - len(line)]
-    user = (
-        f"File: {req.path or 'file'} ({req.language})\n"
-        + (f"Findings from the last compile:\n{notes}" if notes else "")
-        + f"<before_cursor>\n{before}</before_cursor>\n<after_cursor>\n{req.suffix}</after_cursor>\n{task}"
-    )
+    user = _user_text(req, before, task)
     system = PREFILL_SYSTEM_PROMPT + (KERNEL_RULES if req.language in KERNEL_LANGUAGES else "")
     if req.system_extra.strip():
         system += " " + req.system_extra.strip()

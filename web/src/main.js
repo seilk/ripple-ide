@@ -17,7 +17,7 @@ import { analyzePtx, basename } from './ptx-analyze.js';
 import { renderReport } from './report.js';
 import { setupDividers } from './resize.js';
 import { createRippleStatus } from './status.js';
-import { createRippleTools, systemPrompt } from './ripple-tools.js';
+import { contextNote, createRippleTools, systemPrompt } from './ripple-tools.js';
 import { createTree } from './tree.js';
 import { $, debounce, errorText, extOf, h, kernelKind, prefs } from './ui.js';
 
@@ -736,10 +736,11 @@ function setupRipple() {
     },
     getRequest: () => ({ target: lab.target(), options: lab.chatOptions() }),
     onPerf: (perf) => lab.noteChat(perf),
-    systemPrompt: () => [systemPrompt({
+    systemPrompt: () => [systemPrompt({ canRun: state.run.enabled }), lab.chatInstruction()].filter(Boolean).join('\n'),
+    contextNote: () => contextNote({
       active: state.active, kernel: state.active ? kindOf(state.active) : null,
-      toolchain: state.toolchain, arch: els.arch.value, canRun: state.run.enabled,
-    }), lab.chatInstruction()].filter(Boolean).join('\n'),
+      toolchain: state.toolchain, arch: els.arch.value,
+    }),
     tools,
   });
   agent.setQuick(QUICK_PROMPTS.general);

@@ -12,6 +12,8 @@ import ipaddress
 import json
 import os
 import re
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -179,13 +181,18 @@ def open_upstream(preset: dict, body: dict, overrides: dict | None = None) -> HT
     return _post(preset, payload, "text/event-stream", UPSTREAM_TIMEOUT_S)
 
 
-def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPResponse:
+def _headers(preset: dict, accept: str) -> dict:
     headers = {"Content-Type": "application/json", "Accept": accept}
     key = preset_key(preset)
     if key:
         headers["Authorization"] = f"Bearer {key}"
     elif preset is PRESETS["openrouter"]:
         raise UpstreamError(401, "OPENROUTER_API_KEY is not set in the server environment")
+    return headers
+
+
+def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPResponse:
+    headers = _headers(preset, accept)
 
     request = urllib.request.Request(
         preset["base_url"].rstrip("/") + "/chat/completions",
@@ -203,6 +210,100 @@ def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPRes
         reason = getattr(exc, "reason", None) or exc or type(exc).__name__
         raise UpstreamError(502, f"The Ripple server at {preset['base_url']} does not answer ({reason}). "
                                  "Is it running, and is the port forward open?") from exc
+
+
+# Idle connections to Ripple servers, kept open between suggestion requests. A suggestion
+# is one short request per pause in typing; opening a connection for each one costs a
+# round trip before the request is even sent (and a TLS handshake on https). Over the
+# 13 ms link the README measures on, that is a good part of a 76 ms suggestion.
+_IDLE_PER_SERVER = 4
+_idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+_idle_lock = threading.Lock()
+_STALE = (ConnectionError, http.client.BadStatusLine)  # the server closed an idle connection
+
+
+def _connection(key: tuple[str, str, int], timeout_s: float) -> tuple[http.client.HTTPConnection, bool]:
+    """An open connection to reuse, or a new one: (connection, reused)."""
+    with _idle_lock:
+        waiting = _idle.get(key)
+        if waiting:
+            connection = waiting.pop()
+            connection.timeout = timeout_s
+            if connection.sock is not None:
+                connection.sock.settimeout(timeout_s)
+            return connection, True
+    scheme, host, port = key
+    factory = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+    return factory(host, port, timeout=timeout_s), False
+
+
+def _ack_at_once(connection: http.client.HTTPConnection) -> None:
+    """Ask the kernel not to hold back ACKs on this connection (Linux only).
+
+    Measured with a server that writes the headers and the body of its answer in two steps
+    and leaves Nagle's algorithm on (Python's http.server does): on a reused connection the
+    body waits for our ACK of the headers, and a delayed ACK takes 40 ms. A new connection
+    does not show this, so without this call keeping connections open made such a server
+    slower. The setting wears off when we send, so it is set again after every request is sent.
+    """
+    quick = getattr(socket, "TCP_QUICKACK", None)
+    if quick is not None and connection.sock is not None:
+        try:
+            connection.sock.setsockopt(socket.IPPROTO_TCP, quick, 1)
+        except OSError:
+            pass
+
+
+def _keep(key: tuple[str, str, int], connection: http.client.HTTPConnection) -> None:
+    with _idle_lock:
+        waiting = _idle.setdefault(key, [])
+        if len(waiting) < _IDLE_PER_SERVER:
+            waiting.append(connection)
+            return
+    connection.close()
+
+
+def _post_json(preset: dict, payload: dict, timeout_s: float) -> dict:
+    """POST to /chat/completions and return the whole JSON answer, over a kept-alive connection.
+
+    For non-streamed requests only: the answer is read to its end here, so the connection
+    is free again when this returns. Streams keep using `_post`.
+    """
+    headers = _headers(preset, "application/json")
+    url = urlparse(preset["base_url"].rstrip("/") + "/chat/completions")
+    if url.scheme in urllib.request.getproxies() and not urllib.request.proxy_bypass(url.hostname or ""):
+        with _post(preset, payload, "application/json", timeout_s) as response:  # a proxy is in the way: urllib knows how
+            return json.load(response)
+    key = (url.scheme, url.hostname or "", url.port or (443 if url.scheme == "https" else 80))
+    body = json.dumps(payload).encode()
+    try:
+        while True:
+            connection, reused = _connection(key, timeout_s)
+            try:
+                connection.request("POST", url.path, body=body, headers=headers)
+                _ack_at_once(connection)  # after the request: sending is what turns delayed ACKs back on
+                response = connection.getresponse()
+                data = response.read()
+            except _STALE:
+                connection.close()
+                if reused:
+                    continue  # it went stale while idle; ask again on another one
+                raise
+            except BaseException:
+                connection.close()
+                raise
+            if response.will_close:
+                connection.close()
+            else:
+                _keep(key, connection)
+            break
+    except (OSError, http.client.HTTPException) as exc:
+        reason = getattr(exc, "reason", None) or exc or type(exc).__name__
+        raise UpstreamError(502, f"The Ripple server at {preset['base_url']} does not answer ({reason}). "
+                                 "Is it running, and is the port forward open?") from exc
+    if response.status >= 400:
+        raise UpstreamError(response.status, f"upstream {response.status}", data.decode(errors="replace")[:4000])
+    return json.loads(data)
 
 
 def stream_once(preset: dict, messages: list[dict], max_tokens: int, overrides: dict | None = None,
@@ -311,8 +412,7 @@ def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperatu
         if pattern:
             payload["structured_outputs"] = {"regex": pattern}
     try:
-        with _post(preset, payload, "application/json", COMPLETE_TIMEOUT_S) as response:
-            data = json.load(response)
+        data = _post_json(preset, payload, COMPLETE_TIMEOUT_S)
         choice = data["choices"][0]
         return str(choice["message"].get("content") or ""), choice.get("finish_reason") == "length"
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
@@ -375,13 +475,19 @@ def _summarize_report(raw: str) -> str:
     return "\n".join(lines)
 
 
+_IDE_CONTEXT = re.compile(r"<ide_context>.*?</ide_context>\n?", re.DOTALL)
+
+
 def mock_plan(messages: list[dict]) -> tuple[str, str, tuple[str, dict] | None]:
     """Return (reasoning, content, tool_call) for the next mock turn."""
-    system = messages[0].get("content", "") if messages and messages[0].get("role") == "system" else ""
-    match = re.search(r"^Active file: (.+)$", system, re.MULTILINE)
+    # The IDE puts "Active file" in front of each user message (in the system prompt until it
+    # moved for the prefix cache). The newest one counts.
+    told = (str(m.get("content", "")) for m in reversed(messages) if m.get("role") in ("user", "system"))
+    match = next((found for found in (re.search(r"^Active file: (.+)$", text, re.MULTILINE) for text in told) if found), None)
     active = match.group(1).strip() if match else None
     last = messages[-1] if messages else {}
-    asked = next((str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), "").lower()
+    asked = next((str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), "")
+    asked = _IDE_CONTEXT.sub("", asked).lower()  # the user's own words only
 
     if active is None or active == "(none)":
         return ("No file is open.", "Open a kernel file first, then ask again.", None)

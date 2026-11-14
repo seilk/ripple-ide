@@ -2,6 +2,7 @@
 // and a run or a compile report is the model's way to check its own work.
 
 import { streamChat } from './api.js';
+import { wireMessages } from './ripple-tools.js';
 import { errorText, h, prefs } from './ui.js';
 
 const MAX_TURNS = 12;
@@ -118,10 +119,11 @@ function formatTokens(n) {
  *   getRequest: () => {target: object, options: object},
  *   onPerf?: (perf: {ttft: number, tokps: number}) => void,
  *   systemPrompt: () => string,
+ *   contextNote: () => string,
  *   tools: Record<string, (args: any) => Promise<unknown>>,
  * }} deps
  */
-export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
+export function createAgent({ els, getRequest, onPerf, systemPrompt, contextNote, tools }) {
   /** @type {Array<{id: string, title: string, history: Array<any>}>} chats, newest first */
   let chats = [];
   try {
@@ -263,7 +265,7 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
     let usage = null;
 
     const { target, options } = getRequest();
-    await streamChat({ ...target, options, messages: [{ role: 'system', content: systemPrompt() }, ...current.history], tools: TOOLS },
+    await streamChat({ ...target, options, messages: wireMessages(systemPrompt(), current.history), tools: TOOLS },
       (event) => {
         if (event.usage) usage = event.usage;
         const delta = event.choices?.[0]?.delta;
@@ -312,7 +314,8 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
       chats = [chat, ...chats.filter((item) => item !== chat)];
       renderChatList();
     }
-    history.push({ role: 'user', content: text });
+    // The context note is fixed when the message is sent. See wireMessages.
+    history.push({ role: 'user', content: text, context: contextNote() });
     running = new AbortController();
     setBusy(true);
     const block = append(h('div', { class: 'msg msg-ripple' }));

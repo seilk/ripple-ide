@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import stat
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -824,3 +826,135 @@ def test_block_keeps_thirty_lines_by_default_and_follows_the_line_limit():
     assert len(_block(METHOD + "        ", long_body).splitlines()) == complete.MAX_LINES == 30
     assert len(_block(METHOD + "        ", long_body, max_lines=5).splitlines()) == 5
     assert _block(METHOD + "        ", BODY, suffix="\n        return total\n").splitlines()[-1] == "            total += x"
+
+
+# ---------------------------------------------------------------- prefix cache and connection reuse
+
+
+def _shared(a: str, b: str) -> int:
+    """Length of the common start of two texts: what a prefix cache can keep."""
+    return next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+
+
+def test_a_new_line_keeps_the_text_after_the_cursor_in_the_cached_part():
+    after = "\n\nif __name__ == \"__main__\":\n    main()\n"
+    one = complete.plan_prefill(_req("def main():\n    a = 1\n    ", suffix=after, language="python")).messages[1]["content"]
+    two = complete.plan_prefill(_req("def main():\n    a = 1\n    b = 2\n    ", suffix=after, language="python")).messages[1]["content"]
+
+    kept = one[:_shared(one, two)]
+    assert after in kept and kept.endswith("    a = 1\n")  # only the new line and the task are new
+
+
+def test_new_compile_findings_do_not_move_the_code_in_the_prompt():
+    body = {"path": "k.cu", "language": "cuda", "prefix": "void f() {\n  ", "suffix": "\n}\n"}
+    clean = complete.plan_prefill(complete.parse_request(body)).messages[1]["content"]
+    flagged = complete.plan_prefill(complete.parse_request({**body, "findings": ["fp64 at source line 7"]})).messages[1]["content"]
+
+    assert clean[:_shared(clean, flagged)].endswith("</before_cursor>\n") and "fp64 at source line 7" in flagged
+
+
+def test_mock_takes_the_active_file_from_the_newest_user_message():
+    note = "<ide_context>\nActive file: tools/runner.py\nAfter every edit, compile again.\n</ide_context>\n"
+    older = {"role": "user", "content": "<ide_context>\nActive file: a.py\n</ide_context>\nhello"}
+    plan = ripple_api.mock_plan([{"role": "system", "content": "x"}, older, {"role": "assistant", "content": "hi"},
+                                 {"role": "user", "content": note + "what is this?"}])
+    call = {"role": "assistant", "tool_calls": [{"function": {"name": "read_file", "arguments": "{}"}}]}
+    after_read = ripple_api.mock_plan([{"role": "user", "content": note + "what is this?"}, call, {"role": "tool", "content": "x = 1"}])
+
+    assert plan[2] == ("read_file", {"path": "tools/runner.py"})
+    assert after_read[2] is None  # "run" and "edit" in the context note are not the user's words
+
+
+def _keepalive_upstream(close_quietly: bool = False):
+    """A stand-in Ripple server that speaks HTTP/1.1 and notes the connection of each request."""
+    import http.server
+    seen = []
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers["Content-Length"]))
+            seen.append(self.client_address)
+            answer = json.dumps({"choices": [{"message": {"content": " 1"}, "finish_reason": "stop"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+            if close_quietly:
+                self.close_connection = True  # hang up without a "Connection: close" header
+
+        def log_message(self, *args):
+            pass
+
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    preset = {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple", "key_env": [], "extra": {}}
+    return upstream, preset, seen
+
+
+def test_suggestion_requests_share_one_connection():
+    upstream, preset, seen = _keepalive_upstream()
+    try:
+        answers = [ripple_api.complete_once(preset, [{"role": "user", "content": "x ="}], 8, 0.0) for _ in range(4)]
+    finally:
+        upstream.shutdown()
+
+    assert answers == [(" 1", False)] * 4
+    assert len(seen) == 4 and len(set(seen)) == 1  # four requests, one TCP connection
+
+
+def test_a_connection_that_went_stale_is_replaced_without_an_error():
+    upstream, preset, seen = _keepalive_upstream(close_quietly=True)
+    try:
+        answers = [ripple_api.complete_once(preset, [{"role": "user", "content": "x ="}], 8, 0.0) for _ in range(3)]
+    finally:
+        upstream.shutdown()
+
+    assert answers == [(" 1", False)] * 3 and len(set(seen)) == 3
+
+
+def test_an_upstream_error_status_still_reaches_the_caller():
+    import http.server
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers["Content-Length"]))
+            answer = b'{"error": "no such model"}'
+            self.send_response(404)
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+        def log_message(self, *args):
+            pass
+
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    preset = {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple", "key_env": [], "extra": {}}
+    try:
+        with pytest.raises(ripple_api.UpstreamError) as caught:
+            ripple_api.complete_once(preset, [{"role": "user", "content": "x ="}], 8, 0.0)
+    finally:
+        upstream.shutdown()
+
+    assert caught.value.status == 404 and "no such model" in caught.value.payload["detail"]
+
+
+@pytest.mark.skipif(not hasattr(socket, "TCP_QUICKACK"), reason="the delayed-ACK setting is Linux only")
+def test_a_reused_connection_does_not_wait_for_a_delayed_ack():
+    """The stand-in writes headers and body apart with Nagle on. Before the fix each reused request took 40 ms more."""
+    upstream, preset, _ = _keepalive_upstream()
+    try:
+        times = []
+        for _ in range(9):
+            started = time.perf_counter()
+            ripple_api.complete_once(preset, [{"role": "user", "content": "x ="}], 8, 0.0)
+            times.append(time.perf_counter() - started)
+    finally:
+        upstream.shutdown()
+
+    assert sorted(times)[len(times) // 2] < 0.02

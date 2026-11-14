@@ -84,10 +84,14 @@ export function createRippleTools(ide) {
   };
 }
 
-/** @param {{active: string|null, kernel: string|null, toolchain: any, arch: string, canRun: boolean}} session */
-export function systemPrompt({ active, kernel, toolchain, arch, canRun }) {
-  const tc = toolchain || {};
-  const lines = [
+/**
+ * The part of the prompt that is the same for every turn of a session. It is the first
+ * thing the server sees, so nothing that changes while you work belongs here: a change
+ * at the start of the prompt throws away the server's prefix cache for the whole chat.
+ * @param {{canRun: boolean}} session
+ */
+export function systemPrompt({ canRun }) {
+  return [
     'You are Ripple, the coding model inside Ripple IDE. You work on the files of the open project with tools.',
     'Read before you edit. Use search_files to find things. Check your work: run the file or compile the kernel '
       + 'after an edit, and report what the tool showed. Do not claim a result that no tool showed.',
@@ -95,8 +99,19 @@ export function systemPrompt({ active, kernel, toolchain, arch, canRun }) {
       + 'which sends the whole file again. Use write_file for new files only. The user reviews a diff of every change. '
       + 'Keep edits small and explain each one in one line.',
     canRun ? 'run_file runs a .py, .js, .mjs or .sh file after the user allows it.' : 'run_file is off on this server.',
-    `Active file: ${active || '(none)'}`,
-  ];
+    'Each user message starts with an <ide_context> block: what was open in the editor when they wrote it.',
+  ].join('\n');
+}
+
+/**
+ * What the user is looking at when they send a message. It is stored with that message
+ * and sent in front of it, so the chat only ever grows at its end and the prefix cache
+ * of the earlier turns stays valid when the active file changes.
+ * @param {{active: string|null, kernel: string|null, toolchain: any, arch: string}} session
+ */
+export function contextNote({ active, kernel, toolchain, arch }) {
+  const tc = toolchain || {};
+  const lines = [`Active file: ${active || '(none)'}`];
   if (kernel) {
     lines.push(
       `The active file is a GPU kernel (${kernel}). Work like a kernel engineer: compile it, read the report, then act. `
@@ -108,4 +123,20 @@ export function systemPrompt({ active, kernel, toolchain, arch, canRun }) {
     );
   }
   return lines.filter(Boolean).join('\n');
+}
+
+/**
+ * The chat as it goes to the server: the system prompt, then the stored messages, each
+ * user message with its own context note in front. A stored message never changes, so
+ * every request is the one before it plus new messages at the end.
+ * @param {string} system
+ * @param {Array<any>} history stored messages; a user message may carry `context`
+ * @returns {Array<any>}
+ */
+export function wireMessages(system, history) {
+  return [{ role: 'system', content: system }, ...history.map((message) => {
+    if (message.role !== 'user') return message;
+    const { context, ...rest } = message;
+    return context ? { ...rest, content: `<ide_context>\n${context}\n</ide_context>\n${message.content}` } : rest;
+  })];
 }
