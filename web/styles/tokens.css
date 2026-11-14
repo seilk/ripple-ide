@@ -1,0 +1,48 @@
+/* Direction (docs/DESIGN.md): a printed assembly listing on a lab bench at night.
+   Graphite surfaces, three text roles, one accent: the highlighter that marks
+   linked lines in the listing. Colour carries meaning only. */
+:root {
+  --surface-deep: #0f0f10;   /* side panels */
+  --surface-page: #141415;   /* editors */
+  --surface-card: #19191b;
+  --surface-raised: #232325; /* active row, input */
+  --hairline: rgba(237, 237, 237, 0.08);
+  --hairline-strong: rgba(237, 237, 237, 0.16);
+
+  --text: #ededed;
+  --text-2: #a1a1a6;
+  --text-3: #85858b;
+
+  --accent: #e8a33d;                     /* highlighter */
+  --accent-wash: rgba(232, 163, 61, 0.14);
+  --positive: #4cc38a;
+  --negative: #e5484d;
+
+  --font-ui: "IBM Plex Sans", "Helvetica Neue", system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", "SF Mono", Menlo, monospace;
+
+  --text-meta: 0.75rem;     /* 12 */
+  --text-body: 0.8125rem;   /* 13 */
+  --text-title: 1rem;       /* 16 */
+  --text-figure: 2rem;      /* 32 */
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --radius-tag: 4px;
+  --radius-control: 8px;
+  --radius-panel: 16px;
+
+  --topbar-h: 48px;
+  --files-w: 224px;
+  --ripple-w: 344px;
+  --dock-h: 304px;
+  --row-h: 28px;
+
+  --duration: 140ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}

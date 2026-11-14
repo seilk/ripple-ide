@@ -1,0 +1,104 @@
+/* ---------------------------------------------------------------- report */
+.report { overflow: auto; padding: var(--space-4) var(--space-6) var(--space-8); }
+.report-empty { color: var(--text-3); }
+
+.report-head { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin-bottom: var(--space-3); font: 400 var(--text-meta) var(--font-code); color: var(--text-3); }
+.report-head .backend { color: var(--text); }
+.note { margin: 0 0 var(--space-2); padding: var(--space-1) var(--space-3); border-left: 1px solid var(--hairline-strong); color: var(--text-2); }
+
+.fn { display: grid; grid-template-columns: 128px minmax(232px, 1fr) minmax(264px, 1.5fr); gap: var(--space-3) var(--space-8); padding: var(--space-4) 0 var(--space-6); border-top: 1px solid var(--hairline); }
+.fn-title { grid-column: 1 / -1; display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; }
+.fn-title h3 { font-size: var(--text-title); font-weight: 500; line-height: 24px; }
+.fn-title h3 button { all: unset; cursor: pointer; }
+.fn-title h3 button:hover { text-decoration: underline; text-underline-offset: 4px; }
+.fn-title h3 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fn-title .mono { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The register count is the figure a kernel author checks first. */
+.figure-num { font: 500 var(--text-figure)/1 var(--font-code); }
+.figure-num[data-empty] { color: var(--text-3); }
+.figure-label { margin-top: var(--space-2); color: var(--text-2); }
+.figure-sub { font: 400 var(--text-meta) var(--font-code); color: var(--text-3); }
+.figure-sub[data-bad] { color: var(--negative); }
+
+.metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3) var(--space-4); align-content: start; }
+.metrics dt { font-size: var(--text-meta); line-height: 16px; color: var(--text-3); white-space: nowrap; }
+.metrics dd { font: 500 var(--text-title)/24px var(--font-code); }
+.metrics dd[data-flag] { color: var(--accent); }
+
+/* One series: memory instructions lead, the rest sit in neutral steps. */
+.mix { display: flex; gap: 1px; height: 8px; border-radius: 2px; overflow: hidden; }
+.mix i { display: block; min-width: 2px; background: var(--step); }
+.mix i[data-lead] { background: var(--accent); }
+.legend { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); margin-top: var(--space-2); font: 400 var(--text-meta)/20px var(--font-code); color: var(--text-3); }
+.legend span[data-lead] { color: var(--text); }
+.mem { margin-top: var(--space-3); border-collapse: collapse; font: 400 var(--text-meta)/20px var(--font-code); }
+.mem th { font-weight: 400; color: var(--text-3); text-align: right; padding: 0 0 0 var(--space-4); }
+.mem th:first-child { text-align: left; padding-left: 0; min-width: 32px; }
+.mem td { text-align: right; padding: 0 0 0 var(--space-4); color: var(--text); }
+.mem td[data-zero] { color: var(--text-3); }
+
+.lints { grid-column: 1 / -1; display: grid; gap: 2px; }
+.lint {
+  display: grid; grid-template-columns: 8px 88px 56px 56px 56px minmax(0, 1fr); align-items: center; gap: var(--space-3);
+  width: 100%; height: var(--row-h); padding: 0 var(--space-2); border: 0; border-radius: var(--radius-control); background: none;
+  font: 400 var(--text-meta) var(--font-code); text-align: left; color: var(--text-3);
+  transition: background-color var(--duration) var(--ease);
+}
+.lint:hover { background: var(--surface-raised); }
+.lint .dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--text-3); }
+.lint[data-severity="warn"] .dot { background: var(--text); border-color: var(--text); }
+.lint .code { color: var(--text); }
+.lint span { white-space: nowrap; }
+.lint .loop { color: var(--text-2); }
+.lint .msg { font: 400 var(--text-body) var(--font-ui); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lint-more { padding: var(--space-1) var(--space-2); font: 400 var(--text-meta) var(--font-code); color: var(--text-3); }
+.clean { grid-column: 1 / -1; color: var(--text-3); }
+
+.diag {
+  display: grid; grid-template-columns: 56px 64px minmax(0, 1fr); align-items: center; gap: var(--space-3); width: 100%;
+  min-height: var(--row-h); padding: 0 var(--space-2); margin-bottom: 2px; border: 0; border-radius: var(--radius-control); background: none;
+  font: 400 var(--text-meta) var(--font-code); text-align: left; color: var(--text-2);
+  transition: background-color var(--duration) var(--ease);
+}
+.diag span:first-child { color: var(--negative); }
+.diag[data-severity="warning"] span:first-child { color: var(--text); }
+.diag:hover { background: var(--surface-raised); }
+
+.log { margin: 0; padding: var(--space-4) var(--space-6); overflow: auto; font-size: var(--text-meta); line-height: 20px; color: var(--text-2); white-space: pre-wrap; }
+
+/* ---------------------------------------------------------------- Ripple */
+.chat { overflow: auto; padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-4); }
+.chat-empty { margin: auto 0; display: grid; gap: var(--space-1); color: var(--text-3); }
+.chat-empty b { color: var(--text); font-weight: 500; }
+.msg { display: grid; gap: var(--space-2); min-width: 0; }
+.msg-user { align-self: flex-end; max-width: 92%; padding: var(--space-2) var(--space-3); background: var(--surface-raised); border-radius: var(--radius-control); white-space: pre-wrap; overflow-wrap: anywhere; }
+.say { white-space: pre-wrap; overflow-wrap: anywhere; }
+.think { color: var(--text-3); }
+.think summary { cursor: pointer; font-size: var(--text-meta); }
+.think p { margin-top: var(--space-1); white-space: pre-wrap; }
+.tool { display: flex; gap: var(--space-2); align-items: center; height: var(--row-h); padding: 0 var(--space-2); border: 1px solid var(--hairline); border-radius: var(--radius-control); font: 400 var(--text-meta) var(--font-code); color: var(--text-3); min-width: 0; }
+.tool b { color: var(--text); font-weight: 400; flex: none; }
+.tool .arg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool .state { margin-left: auto; flex: none; }
+.tool[data-state="error"] .state, .tool[data-state="rejected"] .state { color: var(--negative); }
+.msg-error { color: var(--negative); font: 400 var(--text-meta) var(--font-code); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.quick { display: grid; gap: 2px; padding: 0 var(--space-2) var(--space-2); }
+.quick button { height: var(--row-h); padding: 0 var(--space-2); border: 0; border-radius: var(--radius-control); background: none; text-align: left; color: var(--text-2); transition: background-color var(--duration) var(--ease), color var(--duration) var(--ease); }
+.quick button:hover { background: var(--surface-raised); color: var(--text); }
+
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); align-items: end; padding: var(--space-3) var(--space-4) var(--space-4); border-top: 1px solid var(--hairline); }
+.composer textarea { resize: none; padding: var(--space-2) var(--space-3); background: var(--surface-raised); border: 1px solid var(--hairline); border-radius: var(--radius-control); line-height: 20px; transition: border-color var(--duration) var(--ease); }
+.composer textarea::placeholder { color: var(--text-3); }
+.composer textarea:focus { border-color: var(--hairline-strong); outline: none; }
+
+/* ---------------------------------------------------------------- diff */
+.diff-dialog { width: min(1104px, 92vw); height: min(680px, 86vh); padding: 0; border: 1px solid var(--hairline-strong); border-radius: var(--radius-panel); background: var(--surface-card); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); overflow: hidden; }
+.diff-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.diff-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.diff-dialog header { display: flex; gap: var(--space-3); align-items: baseline; padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--hairline); }
+.diff-dialog header b { font-weight: 500; font-size: var(--text-title); }
+.diff-dialog header span { font: 400 var(--text-meta) var(--font-code); color: var(--text-2); }
+.diff-dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: 1px solid var(--hairline); }
+.diff-editor { min-height: 0; }

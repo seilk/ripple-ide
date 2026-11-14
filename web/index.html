@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ripple Kernel IDE</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230f0f10'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23ededed'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23ededed' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles/tokens.css">
+  <link rel="stylesheet" href="styles/layout.css">
+  <link rel="stylesheet" href="styles/panels.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <circle cx="12" cy="12" r="2.5" /><circle cx="12" cy="12" r="6.5" /><circle cx="12" cy="12" r="10.5" />
+      </svg>
+      <span class="brand-name">Ripple Kernel IDE</span>
+    </div>
+
+    <button id="toolchain" class="toolchain" type="button" title="Check the toolchain again">Checking toolchain</button>
+
+    <div class="build">
+      <label class="field"><span>Arch</span>
+        <select id="arch" aria-label="GPU architecture">
+          <option>sm_80</option><option>sm_90</option><option selected>sm_100</option><option>sm_120</option>
+        </select>
+      </label>
+      <label class="field grow"><span>Flags</span>
+        <input id="flags" type="text" spellcheck="false" placeholder="-O3 -DN=4" aria-label="Compiler flags">
+      </label>
+      <button id="compile" class="button primary" type="button"><span id="compile-label">Compile to PTX</span><kbd>⌘↵</kbd></button>
+    </div>
+
+    <div class="model">
+      <span id="perf" class="perf" title="Time to first token and output speed of the last Ripple answer"></span>
+      <select id="preset" aria-label="Ripple endpoint"></select>
+    </div>
+  </header>
+
+  <main class="bench">
+    <nav class="files" aria-label="Workspace files">
+      <h2>Workspace</h2>
+      <p id="root" class="root"></p>
+      <ul id="file-list"></ul>
+    </nav>
+
+    <section class="stage" aria-label="Editor">
+      <div id="tabs" class="tabs" role="tablist"></div>
+      <div id="split" class="split">
+        <div class="pane">
+          <div id="src-editor" class="editor"></div>
+        </div>
+        <div class="pane ptx-pane">
+          <header class="pane-head"><b>PTX</b><span id="ptx-meta"></span></header>
+          <div id="ptx-editor" class="editor"></div>
+          <div id="ptx-empty" class="empty"><b>Compile to see the PTX</b><span>The cursor line in the source marks its instructions here</span></div>
+        </div>
+      </div>
+      <section class="dock" aria-label="Kernel report">
+        <div class="dock-tabs" role="tablist">
+          <button id="tab-report" role="tab" aria-selected="true" type="button">Report</button>
+          <button id="tab-log" role="tab" aria-selected="false" type="button">Compiler log</button>
+          <span id="status" class="status" role="status"></span>
+        </div>
+        <div id="report" class="report"></div>
+        <pre id="log" class="log" hidden></pre>
+      </section>
+    </section>
+
+    <aside class="ripple" aria-label="Ripple">
+      <header class="pane-head"><b>Ripple</b><span id="ctx" title="Prompt tokens of the last request, of the context size"></span></header>
+      <div id="chat" class="chat" aria-live="polite"></div>
+      <div id="quick" class="quick"></div>
+      <form id="composer" class="composer">
+        <textarea id="prompt" rows="3" placeholder="Ask about this kernel" aria-label="Message for Ripple"></textarea>
+        <button id="send" class="button primary" type="submit">Send</button>
+      </form>
+    </aside>
+  </main>
+
+  <dialog id="diff-dialog" class="diff-dialog" aria-labelledby="diff-title">
+    <header><b id="diff-title">Review change</b><span id="diff-path"></span></header>
+    <div id="diff-editor" class="diff-editor"></div>
+    <footer>
+      <button id="diff-reject" class="button" type="button">Reject</button>
+      <button id="diff-accept" class="button primary" type="button">Apply</button>
+    </footer>
+  </dialog>
+
+  <script src="vendor/monaco/vs/loader.js"></script>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

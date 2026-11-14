@@ -1,0 +1,6 @@
+__pycache__/
+.pytest_cache/
+tests/e2e/shots/
+node_modules/
+.DS_Store
+.env
