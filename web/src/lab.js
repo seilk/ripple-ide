@@ -5,6 +5,7 @@ import { compare, percentile, runBenchmark } from './bench.js';
 import { errorText, h, prefs } from './ui.js';
 
 const MAX_RUNS_KEPT = 12;
+const PROFILES_KEY = 'profiles-v2'; // v1 stored the old defaults (192 tokens, 10 lines, 0.2) with every profile
 const MAX_SAMPLES = 200;
 
 /** Settings of one profile. An empty chat value means "leave it to the server". */
@@ -12,8 +13,8 @@ const FIELDS = [
   { section: 'Inline suggestions', key: 'debounce', label: 'Pause before asking', unit: 'ms', min: 0, max: 2000, step: 5, value: 0 },
   { key: 'prefix', label: 'Context before the cursor', unit: 'chars', min: 200, max: 40000, step: 100, value: 6000 },
   { key: 'suffix', label: 'Context after the cursor', unit: 'chars', min: 0, max: 16000, step: 100, value: 1500 },
-  { key: 'tokens', label: 'Max tokens', min: 1, max: 1024, step: 1, value: 192 },
-  { key: 'lines', label: 'Max lines shown', min: 1, max: 40, step: 1, value: 10 },
+  { key: 'tokens', label: 'Max tokens', min: 1, max: 2048, step: 1, value: '' },
+  { key: 'lines', label: 'Max lines shown', min: 1, max: 80, step: 1, value: 30 },
   { key: 'temperature', label: 'Temperature', min: 0, max: 2, step: 0.05, value: 0 },
   { key: 'reason', label: 'Let Ripple reason before a suggestion (slow)', type: 'bool', value: false },
   { key: 'instruction', label: 'Extra instruction', type: 'text', value: '' },
@@ -50,7 +51,7 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
   /** @type {Array<any>} */
   let profiles = presets.map((preset) => ({ id: preset.id, name: preset.label, kind: 'preset', preset: preset.id, locked: true, values: { ...DEFAULTS } }));
   try {
-    const saved = JSON.parse(prefs.get('profiles', '[]'));
+    const saved = JSON.parse(prefs.get(PROFILES_KEY, '[]'));
     for (const item of saved) {
       const existing = profiles.find((profile) => profile.id === item.id);
       if (existing) existing.values = { ...DEFAULTS, ...item.values };
@@ -69,7 +70,7 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
 
   const active = () => profiles.find((profile) => profile.id === activeId) || profiles[0];
   const save = () => {
-    prefs.set('profiles', JSON.stringify(profiles.map(({ locked, ...rest }) => rest)));
+    prefs.set(PROFILES_KEY, JSON.stringify(profiles.map(({ locked, ...rest }) => rest)));
     prefs.set('profile', activeId);
   };
 

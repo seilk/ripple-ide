@@ -123,6 +123,11 @@ a chat model is made to act as a completion model.
 | Inline edit of a 2-line function into 5 lines | 0.71 s, first text after 95 ms | not measured |
 | Agent: read a kernel, compile, fix a double literal, compile again | 8.2 s | not measured |
 
+A block suggestion (cursor at the start of a line) runs to the end of its block,
+up to 30 lines. With speculative decoding, one suggestion solved each of the
+eight problems in `workspace/problems` in 114 to 324 ms (all checks pass), and
+wrote a correct 26-line "median of two sorted arrays" in 0.63 s.
+
 Before the request was shaped for a chat model, the same suggestion cases gave
 empty answers (the model reasoned first and used up its tokens), then 7 of 12
 at a median of 1106 ms with reasoning switched off only. The prefix cache halves

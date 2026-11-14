@@ -563,6 +563,7 @@ def test_prefill_plan_at_a_line_start_allows_several_lines():
 
     assert plan.prefill == complete.EMPTY_THINK + "```python\n" and "\n" not in plan.stop
     assert complete.finish_prefilled("    if n < 2:\n        return n\n", req, plan) == "if n < 2:\n        return n"
+    assert plan.mid_line is False and plan.max_tokens == complete.MAX_TOKENS
 
 
 def test_finish_drops_text_that_already_follows_the_cursor():
@@ -774,3 +775,52 @@ def test_http_preview_serves_the_draft_in_a_sandbox(ide):
     assert _call(f"{ide}/api/preview-draft", "POST", {"path": "../x", "content": "y"})[0] == 400
     assert _call(f"{ide}/api/files", headers={"Origin": "null"})[0] == 403  # a sandboxed page cannot call the API
     assert _call(f"{ide}/")[2]["X-Frame-Options"] == "DENY"                  # the IDE itself still cannot be framed
+
+
+# ---------------------------------------------------------------- blocks: indentation and completeness
+
+
+def _block(prefix: str, raw: str, truncated: bool = False, suffix: str = "\n", max_lines: int | None = None) -> str:
+    body = {"language": "python", "path": "a.py", "prefix": prefix, "suffix": suffix}
+    if max_lines:
+        body["options"] = {"max_lines": max_lines}
+    req = complete.parse_request(body)
+    return complete.finish_prefilled(raw, req, complete.plan_prefill(req), truncated)
+
+
+METHOD = "class S:\n    def f(self, xs):\n"
+BODY = "        total = 0\n        for x in xs:\n            total += x\n        return total\n"
+
+
+@pytest.mark.parametrize("cursor_indent", ["", "    ", "        "])
+def test_block_lands_at_the_right_indentation_wherever_the_cursor_is(cursor_indent):
+    text = _block(METHOD + cursor_indent, BODY)
+
+    compile(METHOD + cursor_indent + text + "\n", "a.py", "exec")  # no IndentationError
+    assert (cursor_indent + text).splitlines()[0] == "        total = 0"
+
+
+def test_block_that_belongs_further_left_starts_on_the_next_line():
+    """The cursor sits inside the loop, but the next code is the return after it."""
+    before = METHOD + "        for x in xs:\n            pass\n            "
+    text = _block(before, "        return 0\n")
+
+    assert text == "\n        return 0"
+    compile(before + text + "\n", "a.py", "exec")
+
+
+def test_block_stops_where_its_own_block_ends_and_drops_a_cut_last_line():
+    ran_on = BODY + "\n    def g(self):\n        return 1\n"
+    assert _block(METHOD + "        ", ran_on).splitlines()[-1] == "        return total"  # no second method
+
+    cut = "        total = 0\n        for x in xs:\n            total += x\n        retu"
+    assert _block(METHOD + "        ", cut, truncated=True).splitlines()[-1] == "            total += x"
+    assert _block(METHOD + "        ", cut, truncated=False).splitlines()[-1] == "        retu"  # a full answer is kept as it is
+
+
+def test_block_keeps_thirty_lines_by_default_and_follows_the_line_limit():
+    long_body = "".join(f"        v{n} = {n}\n" for n in range(50))
+
+    assert len(_block(METHOD + "        ", long_body).splitlines()) == complete.MAX_LINES == 30
+    assert len(_block(METHOD + "        ", long_body, max_lines=5).splitlines()) == 5
+    assert _block(METHOD + "        ", BODY, suffix="\n        return total\n").splitlines()[-1] == "            total += x"

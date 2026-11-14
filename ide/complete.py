@@ -28,9 +28,9 @@ MAX_PREFIX_CHARS = 6000
 MAX_SUFFIX_CHARS = 1500
 MAX_BODY_CHARS = 400_000
 MAX_FINDINGS = 8
-MAX_LINES = 10
+MAX_LINES = 30
 MAX_SYSTEM_EXTRA_CHARS = 2000
-MAX_TOKENS = 192
+MAX_TOKENS = 512  # a block; at 250 tok/s that is 2 s at most, and a usual function body is well under 1 s
 TEMPERATURE = 0.0  # sampling made answers worse in the lab cases (7/12 at 0.2, 9/12 at 0)
 EMPTY_THINK = "<think>\n\n</think>\n"  # Ripple's chat template: an empty think block means "answer now"
 FENCE_LANGUAGE = {"cuda": "cpp", "triton": "python", "ptx": "asm", "shell": "bash"}
@@ -113,7 +113,7 @@ def parse_request(body: dict) -> CompletionRequest:
         prefix=stable_window(prefix, prefix_chars),
         suffix=suffix[:suffix_chars],
         findings=tuple(str(item)[:200] for item in findings[:MAX_FINDINGS]),
-        max_lines=_bounded(options, "max_lines", MAX_LINES, 1, 40),
+        max_lines=_bounded(options, "max_lines", MAX_LINES, 1, 80),
         system_extra=str(options.get("system_extra") or "")[:MAX_SYSTEM_EXTRA_CHARS],
         reason=options.get("reason") is True,
     )
@@ -175,6 +175,7 @@ class PrefillPlan:
     strip_space: bool  # the line ended in a space that the prefill does not carry
     max_tokens: int = MAX_TOKENS
     pattern: str | None = None  # regular expression for the answer (structured output)
+    mid_line: bool = True
 
 
 def plan_prefill(req: CompletionRequest) -> PrefillPlan:
@@ -211,10 +212,58 @@ def plan_prefill(req: CompletionRequest) -> PrefillPlan:
         strip_space=mid_line and start != line[: len(line) - len(typed_word)],
         max_tokens=SINGLE_LINE_MAX_TOKENS if mid_line else MAX_TOKENS,
         pattern=_line_pattern(line, typed_word) if mid_line else None,
+        mid_line=mid_line,
     )
 
 
-def finish_prefilled(raw: str, req: CompletionRequest, plan: PrefillPlan) -> str:
+def _indent(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def fit_block(raw: str, req: CompletionRequest, truncated: bool) -> str:
+    """Make a block written at a line start fit the place it goes to.
+
+    The model writes whole lines with their own indentation. Three things went wrong
+    before this existed: a block cut by the line limit in the middle of a loop, a last
+    line cut in the middle by the token limit, and a first line whose indentation did
+    not match the cursor's, which made a Python indentation error.
+    """
+    lines = raw.replace("\r\n", "\n").strip("\n").split("\n")
+    if truncated and len(lines) > 1:
+        lines = lines[:-1]  # the token limit can cut the last line in half
+    if not lines or not lines[0].strip():
+        return ""
+    own = _indent(lines[0])
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() and len(_indent(line)) < len(own):
+            lines = lines[:index]  # the block the cursor is in has ended; do not start the next one
+            break
+    lines = lines[: req.max_lines]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    cursor = req.line_prefix  # only white space here
+    if own.startswith(cursor):
+        text = "\n".join([lines[0][len(cursor):], *lines[1:]])
+    else:
+        # The model wants this code further left than the cursor is (the end of an inner
+        # block). Text can only be added at the cursor, so it starts on the next line.
+        text = "\n" + "\n".join(lines)
+    return _cut_at_following(text, req)
+
+
+def _cut_at_following(text: str, req: CompletionRequest) -> str:
+    """Drop what the model wrote again from the text after the cursor."""
+    following = next((line.strip() for line in req.suffix.split("\n") if line.strip()), "")
+    if len(following) >= 3:
+        cut = text.find(following)
+        if cut > 0:
+            return text[:cut].rstrip()
+    return text.rstrip()
+
+
+def finish_prefilled(raw: str, req: CompletionRequest, plan: PrefillPlan, truncated: bool = False) -> str:
+    if not plan.mid_line:
+        return fit_block(raw, req, truncated)
     text = raw.lstrip(" \t") if plan.strip_space or plan.typed_word else raw
     if plan.typed_word:
         if not text.startswith(plan.typed_word):

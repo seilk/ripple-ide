@@ -308,14 +308,15 @@ class IdeHandler(SimpleHTTPRequestHandler):
             plan = complete.plan_prefill(request) if ripple_api.can_prefill(preset) and not request.reason else None
             try:
                 if plan:
-                    raw = ripple_api.complete_once(preset, plan.messages, plan.max_tokens, complete.TEMPERATURE,
-                                                   overrides, plan.prefill, plan.stop, plan.pattern)
+                    raw, truncated = ripple_api.complete_once(preset, plan.messages, plan.max_tokens, complete.TEMPERATURE,
+                                                              overrides, plan.prefill, plan.stop, plan.pattern)
                 else:
-                    raw = ripple_api.complete_once(preset, complete.build_messages(request),
-                                                   complete.MAX_TOKENS, complete.TEMPERATURE, overrides)
+                    raw, truncated = ripple_api.complete_once(preset, complete.build_messages(request),
+                                                              complete.MAX_TOKENS, complete.TEMPERATURE, overrides)
             except ripple_api.UpstreamError as exc:
                 return self._json(exc.status, exc.payload)
-            text = complete.finish_prefilled(raw, request, plan) if plan else complete.clean_completion(raw, request)
+            text = (complete.finish_prefilled(raw, request, plan, truncated) if plan
+                    else complete.clean_completion(raw, request))
             source = "ripple"
         return self._json(200, {"completion": text, "source": source, "ms": round((time.time() - started) * 1000)})
 

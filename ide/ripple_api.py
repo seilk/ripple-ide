@@ -296,8 +296,8 @@ def can_prefill(preset: dict) -> bool:
 
 def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperature: float,
                   overrides: dict | None = None, prefill: str | None = None, stop: list[str] | None = None,
-                  pattern: str | None = None) -> str:
-    """One short non-streamed answer, for inline completion.
+                  pattern: str | None = None) -> tuple[str, bool]:
+    """One short non-streamed answer, for inline completion: (text, cut by the token limit).
 
     With `prefill`, the assistant turn is started for the model and it continues from there.
     """
@@ -313,7 +313,8 @@ def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperatu
     try:
         with _post(preset, payload, "application/json", COMPLETE_TIMEOUT_S) as response:
             data = json.load(response)
-        return str(data["choices"][0]["message"].get("content") or "")
+        choice = data["choices"][0]
+        return str(choice["message"].get("content") or ""), choice.get("finish_reason") == "length"
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise UpstreamError(502, f"unexpected completion answer: {exc}") from exc
     except (OSError, http.client.HTTPException) as exc:
