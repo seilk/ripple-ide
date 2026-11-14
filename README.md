@@ -2,7 +2,19 @@
 
 A browser IDE with Ripple-65B as the coding model: inline suggestions as you
 type, and an agent in the side panel that reads, searches, edits, runs and
-checks its own work. GPU kernel files (CUDA, Triton, PTX) get extra tools.
+checks its own work. Ripple runs on your own machine, so the IDE also lets you
+change how it is used and measure the result.
+
+## Modes
+
+One IDE, three modes. `⇧⌘P` opens the command list; type `Mode`. The open
+files stay when the mode changes.
+
+| Mode | What the IDE is made of |
+|------|-------------------------|
+| General | Files, editor, run output, Ripple panel. A `.cu` file is an ordinary source file here. |
+| Kernel | Adds the PTX pane, toolchain, arch and flags, live compile, the kernel report and kernel quick fixes. |
+| Ripple lab | Adds the profile editor next to the code and the benchmark below it. |
 
 ```bash
 python3 server.py                       # http://127.0.0.1:8787, sample project, mock Ripple
@@ -24,10 +36,30 @@ the browser.
 | Ask about code | `⌘L` puts the selection in the prompt. |
 | Layout | Drag any divider. Double-click it to reset. Arrow keys work on a focused divider. |
 
-## Kernel files
+## Ripple lab
 
-Open a `.cu` or `.ptx` file, or a Python file that imports Triton, and the
-kernel tools appear.
+A profile is one way to use Ripple. The list in the top bar picks the profile
+the whole IDE uses, and a change applies to the next request with no restart.
+
+| Setting | Effect |
+|---------|--------|
+| Endpoint | A server preset, or a custom URL on localhost or a private address. Point a second profile at a second build of the runtime to compare them. |
+| Inline suggestions | Pause before asking, context before and after the cursor, max tokens, max lines, temperature, extra instruction. |
+| Chat | Temperature, top p, max tokens, extra instruction. |
+| Extra request body | JSON merged into every request, for runtime-specific fields. |
+
+`Run benchmark` sends 12 suggestion cases and 2 chat prompts, one request at a
+time, and adds a row: cases passed, median and 95th percentile latency, time to
+first token, tokens per second. Each row shows its change against the baseline
+row. A case passes when the suggestion matches a pattern, so the score tells
+you when a change breaks answers; it is not a judgement of code quality.
+
+The pane also counts this session: suggestions shown and accepted, and the
+median latency of real use.
+
+## Kernel mode
+
+Open a `.cu` or `.ptx` file, or a Python file that imports Triton.
 
 | Area | Function |
 |------|----------|
@@ -73,12 +105,13 @@ python3 server.py --host <address> --allow-host <dns-name> --allow-run   # also 
 ```
 
 Without `--allow-run`, a shared server refuses the Run button and `run_file`.
+Without `--allow-custom-endpoints`, it also refuses custom URLs in the lab.
 
 ## Tests
 
 ```bash
 python3 -m pytest tests -q          # server, toolchain, workspace, runner, completion
-node --test tests/*.test.mjs        # PTX analyzer
+node --test tests/*.test.mjs        # PTX analyzer, benchmark maths
 tests/e2e/run.sh                    # browser test (needs Playwright + Chromium)
 ```
 
@@ -99,7 +132,8 @@ ide/complete.py      inline completion: prompt, answer cleaning, idiom table
 ide/ripple_api.py    Ripple endpoints and the mock
 ide/toolchain.py     nvcc / clang NVPTX / Triton -> PTX, ptxas log parsing
 web/src/             editor, file tree, palette, suggestions, Ripple panel,
-                     and the kernel tools (ptx-analyze, link, report, fixes)
+                     lab (lab, bench, bench-cases),
+                     kernel tools (ptx-analyze, link, report, fixes)
 docs/                runtime slot, design direction
 ```
 

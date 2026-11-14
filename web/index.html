@@ -21,6 +21,8 @@
       <span class="brand-name">Ripple IDE</span>
     </div>
 
+    <button id="mode" class="mode" type="button" title="Change mode (Cmd/Ctrl+Shift+P)">General</button>
+
     <button id="open-palette" class="search-box" type="button" title="Go to file (Cmd/Ctrl+P). Search in files: Cmd/Ctrl+Shift+F">
       <span>Go to file</span><kbd>⌘P</kbd>
     </button>
@@ -41,7 +43,7 @@
 
     <div class="model">
       <span id="perf" class="perf" title="Time to first token and output speed of the last Ripple answer"></span>
-      <select id="preset" aria-label="Ripple endpoint"></select>
+      <select id="preset" aria-label="Ripple profile" title="The Ripple profile the IDE uses. Edit profiles in Ripple lab mode"></select>
     </div>
   </header>
 
@@ -65,17 +67,19 @@
 
     <section id="stage" class="stage" aria-label="Editor">
       <div id="tabs" class="tabs" role="tablist"></div>
-      <div id="split" class="split" data-single>
+      <div id="split" class="split">
         <div id="src-pane" class="pane">
           <div id="src-editor" class="editor"></div>
           <div id="welcome" class="empty welcome">
             <b>Open a file from the list</b>
             <span>Go to file <kbd>⌘P</kbd></span>
             <span>Search in files <kbd>⇧⌘F</kbd></span>
+            <span>Commands and modes <kbd>⇧⌘P</kbd></span>
             <span>Ask Ripple about a selection <kbd>⌘L</kbd></span>
           </div>
         </div>
         <div id="divide-split" class="divider divider-x" role="separator" aria-orientation="vertical" aria-label="Resize source and PTX" tabindex="0"></div>
+        <div id="lab-pane" class="pane lab-pane" aria-label="Ripple lab"></div>
         <div class="pane ptx-pane">
           <header class="pane-head"><b>PTX</b><span id="ptx-meta"></span>
             <button id="toggle-debug" class="toggle" type="button" aria-pressed="false" title="Show .loc lines and debug labels">Line info</button>
@@ -90,8 +94,10 @@
           <button id="tab-output" role="tab" aria-selected="true" type="button">Output</button>
           <button id="tab-report" class="kernel-only" role="tab" aria-selected="false" type="button">Kernel report</button>
           <button id="tab-log" class="kernel-only" role="tab" aria-selected="false" type="button">Compiler log</button>
+          <button id="tab-bench" class="lab-only" role="tab" aria-selected="false" type="button">Benchmark</button>
         </div>
         <pre id="output" class="log output"></pre>
+        <div id="bench" class="bench-panel" hidden></div>
         <div id="report" class="report" hidden></div>
         <pre id="log" class="log" hidden></pre>
       </section>

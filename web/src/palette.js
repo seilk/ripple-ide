@@ -1,12 +1,13 @@
-// Quick open (file names) and search in files, in one small dialog.
+// One small dialog for three jobs: go to file, search in files, run a command.
 
 import { debounce, h } from './ui.js';
 
 const MAX_ROWS = 40;
 const SEARCH_DELAY_MS = 200;
+const PLACEHOLDER = { files: 'Go to file', text: 'Search in files', commands: 'Run a command' };
 
-/** Subsequence match; a lower score is a better match. */
-function score(query, text) {
+/** Subsequence match; a lower score is a better match, -1 is no match. */
+export function fuzzyScore(query, text) {
   let from = 0;
   let total = 0;
   for (const ch of query) {
@@ -19,27 +20,28 @@ function score(query, text) {
 }
 
 /**
+ * @typedef {{label: string, detail?: string, hint?: string, run: () => void}} PaletteItem
  * @param {{
  *   dialog: HTMLDialogElement, input: HTMLInputElement, list: HTMLElement,
- *   getFiles: () => Array<{path: string}>,
- *   search: (query: string) => Promise<Array<{path: string, line: number, text: string}>>,
- *   onPick: (path: string, line?: number) => void,
+ *   getFiles: () => PaletteItem[],
+ *   getCommands: () => PaletteItem[],
+ *   search: (query: string) => Promise<PaletteItem[]>,
  * }} deps
  */
-export function createPalette({ dialog, input, list, getFiles, search, onPick }) {
-  /** @type {'files'|'text'} */
+export function createPalette({ dialog, input, list, getFiles, getCommands, search }) {
+  /** @type {'files'|'text'|'commands'} */
   let mode = 'files';
-  /** @type {Array<{path: string, line?: number, text?: string}>} */
+  /** @type {PaletteItem[]} */
   let rows = [];
   let active = 0;
   let ticket = 0;
 
   function paint() {
     list.replaceChildren(...rows.map((row, index) => h('li', {}, h('button', {
-      class: 'palette-row', type: 'button', 'aria-selected': String(index === active),
-      onclick: () => pick(index),
-    }, h('span', { class: 'mono' }, row.line ? `${row.path}:${row.line}` : row.path),
-    row.text ? h('span', { class: 'palette-text' }, row.text) : null))));
+      class: 'palette-row', type: 'button', 'aria-selected': String(index === active), onclick: () => pick(index),
+    }, h('span', { class: mode === 'commands' ? '' : 'mono' }, row.label),
+    h('span', { class: 'palette-text' }, row.detail || ''),
+    row.hint ? h('kbd', {}, row.hint) : null))));
     if (!rows.length && input.value.trim()) list.append(h('li', { class: 'palette-none' }, 'No matches'));
     list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
   }
@@ -48,7 +50,7 @@ export function createPalette({ dialog, input, list, getFiles, search, onPick })
     const row = rows[index];
     if (!row) return;
     dialog.close();
-    onPick(row.path, row.line);
+    row.run();
   }
 
   const searchText = debounce(async (query) => {
@@ -72,11 +74,13 @@ export function createPalette({ dialog, input, list, getFiles, search, onPick })
       return;
     }
     const needle = query.toLowerCase();
-    rows = getFiles()
-      .map((file) => ({ path: file.path, rank: needle ? score(needle, file.path.toLowerCase()) : 0 }))
+    const items = mode === 'files' ? getFiles() : getCommands();
+    rows = items
+      .map((item, order) => ({ item, order, rank: needle ? fuzzyScore(needle, item.label.toLowerCase()) : 0 }))
       .filter((row) => row.rank >= 0)
-      .sort((a, b) => a.rank - b.rank || a.path.localeCompare(b.path))
-      .slice(0, MAX_ROWS);
+      .sort((a, b) => a.rank - b.rank || a.order - b.order)
+      .slice(0, MAX_ROWS)
+      .map((row) => row.item);
     active = 0;
     paint();
   }
@@ -95,11 +99,11 @@ export function createPalette({ dialog, input, list, getFiles, search, onPick })
   dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
 
   return {
-    /** @param {'files'|'text'} next */
-    open(next) {
+    /** @param {'files'|'text'|'commands'} next @param {string} [query] text to start with */
+    open(next, query = '') {
       mode = next;
-      input.value = '';
-      input.placeholder = mode === 'files' ? 'Go to file' : 'Search in files';
+      input.value = query;
+      input.placeholder = PLACEHOLDER[mode];
       rows = [];
       if (!dialog.open) dialog.showModal();
       update();

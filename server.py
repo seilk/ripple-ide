@@ -46,6 +46,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
     mock_delay_s = 0.03
     allowed_hosts: frozenset[str] = LOCAL_HOSTS
     run_enabled = True
+    custom_endpoints = True
+    endpoint_hosts: frozenset[str] = frozenset()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -108,7 +110,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
         try:
             if url.path == "/api/presets":
                 return self._json(200, {"presets": ripple_api.public_presets(),
-                                             "default": ripple_api.default_preset()})
+                                             "default": ripple_api.default_preset(),
+                                             "custom_endpoints": self.custom_endpoints})
             if url.path == "/api/toolchain":
                 return self._json(200, self.toolchain.info(refresh="refresh" in query).to_json())
             if url.path == "/api/files":
@@ -218,12 +221,17 @@ class IdeHandler(SimpleHTTPRequestHandler):
         yield first
         yield from rest
 
+    def _target(self, body: dict) -> tuple[dict, dict]:
+        """(endpoint, request overrides) for a chat or completion request."""
+        preset = ripple_api.resolve_target(body, self.custom_endpoints, self.endpoint_hosts)
+        return preset, ripple_api.parse_options(body)
+
     def _complete(self, body: dict) -> None:
-        preset = ripple_api.PRESETS.get(str(body.get("preset", "")))
-        if preset is None:
-            return self._json(400, {"error": f"unknown preset; use one of {sorted(ripple_api.PRESETS)}"})
         try:
+            preset, overrides = self._target(body)
             request = complete.parse_request(body)
+        except ripple_api.UpstreamError as exc:
+            return self._json(exc.status, exc.payload)
         except ValueError as exc:
             return self._json(400, {"error": str(exc)})
         started = time.time()
@@ -232,17 +240,18 @@ class IdeHandler(SimpleHTTPRequestHandler):
         else:
             try:
                 raw = ripple_api.complete_once(preset, complete.build_messages(request),
-                                               complete.MAX_TOKENS, complete.TEMPERATURE)
+                                               complete.MAX_TOKENS, complete.TEMPERATURE, overrides)
             except ripple_api.UpstreamError as exc:
                 return self._json(exc.status, exc.payload)
             text, source = complete.clean_completion(raw, request), "ripple"
         return self._json(200, {"completion": text, "source": source, "ms": round((time.time() - started) * 1000)})
 
     def _chat(self, body: dict) -> None:
-        preset = ripple_api.PRESETS.get(str(body.get("preset", "")))
         messages = body.get("messages")
-        if preset is None:
-            return self._json(400, {"error": f"unknown preset; use one of {sorted(ripple_api.PRESETS)}"})
+        try:
+            preset, overrides = self._target(body)
+        except ripple_api.UpstreamError as exc:
+            return self._json(exc.status, exc.payload)
         if not isinstance(messages, list) or not messages:
             return self._json(400, {"error": "messages must be a non-empty list"})
 
@@ -256,7 +265,7 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return None
 
         try:
-            upstream = ripple_api.open_upstream(preset, body)
+            upstream = ripple_api.open_upstream(preset, body, overrides)
         except ripple_api.UpstreamError as exc:
             return self._json(exc.status, exc.payload)
         self._start_sse()
@@ -275,7 +284,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
 
 def build_server(port: int, workspace: Path, ssh_host: str | None, mock_delay_s: float = 0.03,
                  host: str = "127.0.0.1", allow_hosts: tuple[str, ...] = (),
-                 allow_run: bool = False) -> ThreadingHTTPServer:
+                 allow_run: bool = False, allow_custom_endpoints: bool = False,
+                 endpoint_hosts: tuple[str, ...] = ()) -> ThreadingHTTPServer:
     IdeHandler.workspace = Workspace(workspace)
     IdeHandler.allowed_hosts = LOCAL_HOSTS | {host.lower()} | {name.lower().rstrip(".") for name in allow_hosts}
     IdeHandler.toolchain = Toolchain(
@@ -285,6 +295,8 @@ def build_server(port: int, workspace: Path, ssh_host: str | None, mock_delay_s:
     )
     IdeHandler.mock_delay_s = mock_delay_s
     IdeHandler.run_enabled = allow_run or host in LOCAL_HOSTS  # code execution stays local unless asked for
+    IdeHandler.custom_endpoints = allow_custom_endpoints or host in LOCAL_HOSTS  # so do calls to other local servers
+    IdeHandler.endpoint_hosts = frozenset(name.lower() for name in endpoint_hosts)
     server = ThreadingHTTPServer((host, port), IdeHandler)
     server.daemon_threads = True
     return server
@@ -300,11 +312,15 @@ def main() -> None:
     parser.add_argument("--allow-host", action="append", default=[], help="extra host name that may reach the API")
     parser.add_argument("--allow-run", action="store_true",
                         help="let the Run button execute files when --host is not localhost")
+    parser.add_argument("--allow-custom-endpoints", action="store_true",
+                        help="let the lab call custom Ripple endpoints when --host is not localhost")
+    parser.add_argument("--allow-endpoint-host", action="append", default=[],
+                        help="extra host name a custom Ripple endpoint may use (default: localhost and private addresses)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     server = build_server(args.port, args.workspace, args.ssh, args.mock_delay, args.host, tuple(args.allow_host),
-                          args.allow_run)
+                          args.allow_run, args.allow_custom_endpoints, tuple(args.allow_endpoint_host))
     info = IdeHandler.toolchain.info()
     log.info("Ripple IDE  ->  http://%s:%d", args.host, args.port)
     if args.host not in LOCAL_HOSTS:

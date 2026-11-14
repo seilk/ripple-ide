@@ -1,5 +1,6 @@
-// Ripple IDE: a general editor with Ripple as the agent. Kernel files (CUDA,
-// Triton, PTX) also get the PTX pane, live compile and the kernel report.
+// Ripple IDE: one editor, three modes. General is a plain IDE with Ripple.
+// Kernel adds the PTX pane, live compile and the kernel report. Lab changes how
+// the IDE talks to Ripple and measures what each change did.
 
 import { createAgent } from './agent.js';
 import { api, streamRun } from './api.js';
@@ -8,6 +9,7 @@ import { registerInlineSuggestions } from './complete.js';
 import { createDiffEditor, createEditor, languageFor, loadMonaco } from './editor.js';
 import { registerQuickFixes } from './fixes.js';
 import { registerKernelLanguages } from './kernel-lang.js';
+import { createLab } from './lab.js';
 import { createLinker } from './link.js';
 import { createPalette } from './palette.js';
 import { analyzePtx, basename } from './ptx-analyze.js';
@@ -23,6 +25,7 @@ const MAX_FINDINGS_FOR_SUGGESTIONS = 8;
 const MAX_OUTPUT_CHARS = 200_000;
 const COMPILE_LABEL = { cuda: 'Compile to PTX', ptx: 'Check PTX', triton: 'Run for PTX' };
 const PREF_KEY = { live: 'live', suggest: 'suggest', showDebugLines: 'debug-lines' };
+const MODES = { general: 'General', kernel: 'Kernel', lab: 'Ripple lab' };
 const DEBUG_LINE_RE = /^\s*(?:\.loc\b|\$L__(?:tmp|func_begin|func_end)\d+:)/; // line info, not instructions
 const QUICK_PROMPTS = {
   kernel: ['Why is this kernel slow', 'Explain the hot loop', 'Add a header comment'],
@@ -39,6 +42,7 @@ const state = {
   /** @type {any} */ toolchain: null,
   run: { enabled: false, /** @type {string[]} */ extensions: [] },
   /** @type {AbortController|null} */ running: null,
+  /** @type {'general'|'kernel'|'lab'} */ mode: 'general',
   live: prefs.get('live', 'on') === 'on',
   suggest: prefs.get('suggest', 'on') === 'on',
   showDebugLines: prefs.get('debug-lines', 'off') === 'on',
@@ -47,30 +51,36 @@ const state = {
 const els = {
   toolchain: $('toolchain'), arch: /** @type {HTMLSelectElement} */ ($('arch')),
   flags: /** @type {HTMLInputElement} */ ($('flags')), primary: /** @type {HTMLButtonElement} */ ($('primary')),
-  primaryLabel: $('primary-label'), preset: /** @type {HTMLSelectElement} */ ($('preset')),
+  primaryLabel: $('primary-label'), preset: /** @type {HTMLSelectElement} */ ($('preset')), mode: $('mode'),
   root: $('root'), outline: $('outline'), outlineTitle: $('outline-title'),
   newFile: $('new-file'), newFileForm: /** @type {HTMLFormElement} */ ($('new-file-form')),
   newFilePath: /** @type {HTMLInputElement} */ ($('new-file-path')),
   tabs: $('tabs'), split: $('split'), welcome: $('welcome'),
   ptxMeta: $('ptx-meta'), ptxEmpty: $('ptx-empty'),
   output: $('output'), report: $('report'), log: $('log'),
-  tabOutput: $('tab-output'), tabReport: $('tab-report'), tabLog: $('tab-log'), status: $('status'),
+  tabOutput: $('tab-output'), tabReport: $('tab-report'), tabLog: $('tab-log'), tabBench: $('tab-bench'),
+  bench: $('bench'), status: $('status'),
   toggleLive: $('toggle-live'), toggleSuggest: $('toggle-suggest'), toggleDebug: $('toggle-debug'),
   suggestState: $('suggest-state'), cursor: $('cursor'), language: $('language'),
   diffDialog: /** @type {HTMLDialogElement} */ ($('diff-dialog')), diffPath: $('diff-path'),
   confirmDialog: /** @type {HTMLDialogElement} */ ($('confirm-dialog')),
 };
 
-let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette;
+let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette; let lab;
 
 function setStatus(text, kind = '') {
   els.status.textContent = text;
   els.status.dataset.kind = kind;
 }
 
-/** Kernel kind of a file ('cuda', 'ptx', 'triton') or null for an ordinary file. */
-function kindOf(path) {
+/** What the file is: 'cuda', 'ptx', 'triton', or null for an ordinary file. */
+function fileKind(path) {
   return kernelKind(path, state.open.get(path)?.model.getValue() ?? '');
+}
+
+/** The kernel kind the IDE acts on. Kernel tools are on in Kernel mode only. */
+function kindOf(path) {
+  return state.mode === 'kernel' ? fileKind(path) : null;
 }
 
 const canRun = (path) => state.run.enabled && state.run.extensions.includes(`.${extOf(path)}`);
@@ -157,7 +167,6 @@ function clearActive() {
   linker.clear();
   els.welcome.hidden = false;
   els.language.textContent = '';
-  document.body.removeAttribute('data-kernel');
   renderTabs();
   tree.refresh();
   updatePrimary();
@@ -212,17 +221,27 @@ function setActive(path) {
   els.welcome.hidden = true;
   prefs.set('active', path);
   const kind = kindOf(path);
-  document.body.toggleAttribute('data-kernel', Boolean(kind));
   const language = monaco.languages.getLanguages().find((item) => item.id === model.getLanguageId());
-  els.language.textContent = kind === 'triton' ? 'Triton' : language?.aliases?.[0] || model.getLanguageId();
+  els.language.textContent = fileKind(path) === 'triton' ? 'Triton' : language?.aliases?.[0] || model.getLanguageId();
   agent.setQuick(kind ? QUICK_PROMPTS.kernel : QUICK_PROMPTS.general);
   renderTabs();
   tree.refresh();
   updatePrimary();
   showResult();
-  selectDock(kind ? 'report' : 'output');
+  selectDock(state.mode === 'lab' ? 'bench' : kind ? 'report' : 'output');
   srcEditor.focus();
   if (kind === 'cuda' && !state.results.has(path)) liveCompile(path); // show PTX as soon as a kernel opens
+  if (state.mode === 'general' && fileKind(path)) setStatus('Kernel file. Kernel mode adds the PTX pane and the report (Cmd/Ctrl+Shift+P)');
+}
+
+/** Change what the IDE is made of. The open files stay. */
+function setMode(mode) {
+  state.mode = mode;
+  prefs.set('mode', mode);
+  document.body.dataset.mode = mode;
+  els.mode.textContent = MODES[mode];
+  if (state.active) setActive(state.active);
+  else { showResult(); selectDock(mode === 'lab' ? 'bench' : 'output'); updatePrimary(); }
 }
 
 // ------------------------------------------------------------------ primary action: run or compile
@@ -353,7 +372,8 @@ function showResult() {
   const kind = path ? kindOf(path) : null;
   const stored = path ? state.results.get(path) : null;
   const res = stored?.res ?? null;
-  els.split.toggleAttribute('data-single', kind === null || kind === 'ptx');
+  const second = state.mode === 'lab' ? 'lab' : kind === 'cuda' || kind === 'triton' ? 'ptx' : null;
+  if (second) els.split.dataset.second = second; else delete els.split.dataset.second;
   const report = (analysis) => renderReport(els.report, {
     analysis, res, sourceName: path || '', onJump: jump, stale: stored?.stale ?? false,
     baseline: path && kind !== 'ptx' ? state.baselines.get(path) ?? null : null,
@@ -393,7 +413,7 @@ async function compile(path, { allowRun = false } = {}) {
   const res = await api.compile({
     path, content: entry.model.getValue(), arch: els.arch.value, flags: els.flags.value.trim(), allow_run: allowRun,
   });
-  const isPtx = kindOf(path) === 'ptx';
+  const isPtx = fileKind(path) === 'ptx'; // Ripple may compile a kernel in any mode
   const text = isPtx ? entry.model.getValue() : res.ptx;
   const previous = state.results.get(path);
   const result = !isPtx && !res.ok && previous?.ptx
@@ -440,7 +460,8 @@ function liveCompile(path) {
 }
 
 function selectDock(which) {
-  for (const [name, tab, panel] of [['output', els.tabOutput, els.output], ['report', els.tabReport, els.report], ['log', els.tabLog, els.log]]) {
+  for (const [name, tab, panel] of [['output', els.tabOutput, els.output], ['report', els.tabReport, els.report],
+    ['log', els.tabLog, els.log], ['bench', els.tabBench, els.bench]]) {
     tab.setAttribute('aria-selected', String(name === which));
     panel.hidden = name !== which;
   }
@@ -466,12 +487,13 @@ async function refreshToolchain(refresh = false) {
   updatePrimary();
 }
 
-async function loadPresets() {
-  const { presets, default: fallback } = await api.presets();
-  els.preset.replaceChildren(...presets.map((p) => h('option', { value: p.id, title: p.note }, p.ready ? p.label : `${p.label} (no key)`)));
-  const wanted = prefs.get('preset', fallback);
-  els.preset.value = presets.some((p) => p.id === wanted) ? wanted : fallback;
-  els.preset.addEventListener('change', () => prefs.set('preset', els.preset.value));
+/** Every preset becomes a lab profile; the top-bar list picks the Ripple the IDE uses. */
+async function loadLab() {
+  const { presets, default: fallback, custom_endpoints: customEndpoints } = await api.presets();
+  lab = createLab({
+    pane: $('lab-pane'), benchPanel: els.bench, select: els.preset, presets, defaultPreset: fallback,
+    customEndpoints, onStatus: setStatus,
+  });
 }
 
 /** @param {HTMLElement} button @param {'live'|'suggest'|'showDebugLines'} key @param {() => void} onChange */
@@ -488,6 +510,7 @@ function bindToggle(button, key, onChange) {
 
 function showSuggestState({ phase, source, ms, message }) {
   const from = source === 'ripple' ? `Ripple, ${ms} ms` : 'idioms';
+  if (phase === 'shown') lab.noteSuggestion(ms);
   els.suggestState.textContent = phase === 'asking' ? 'Suggesting'
     : phase === 'shown' ? `Tab accepts (${from})`
       : phase === 'error' ? `Suggestion failed: ${message}` : '';
@@ -575,6 +598,7 @@ function setupEditors() {
     });
     editor.addCommand(mod | monaco.KeyCode.KeyP, () => palette.open('files'));
     editor.addCommand(mod | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, () => palette.open('text'));
+    editor.addCommand(mod | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, () => palette.open('commands'));
   }
   srcEditor.addAction({
     id: 'ripple.ask', label: 'Ripple: Ask about selection', contextMenuGroupId: 'ide', contextMenuOrder: 2,
@@ -591,17 +615,21 @@ function setupChrome() {
     onOpen: (path) => openFile(path).catch((error) => setStatus(errorText(error), 'error')),
     onDelete: deleteFile,
   });
+  const open = (path, line) => openFile(path, line).catch((error) => setStatus(errorText(error), 'error'));
   palette = createPalette({
     dialog: /** @type {HTMLDialogElement} */ ($('palette')), input: /** @type {HTMLInputElement} */ ($('palette-input')),
-    list: $('palette-list'), getFiles: () => state.files,
-    search: async (query) => (await api.search(query)).hits,
-    onPick: (path, line) => openFile(path, line).catch((error) => setStatus(errorText(error), 'error')),
+    list: $('palette-list'),
+    getFiles: () => state.files.map((file) => ({ label: file.path, run: () => open(file.path) })),
+    getCommands: commands,
+    search: async (query) => (await api.search(query)).hits
+      .map((hit) => ({ label: `${hit.path}:${hit.line}`, detail: hit.text, run: () => open(hit.path, hit.line) })),
   });
   $('open-palette').addEventListener('click', () => palette.open('files'));
+  els.mode.addEventListener('click', () => palette.open('commands', 'Mode: '));
   window.addEventListener('keydown', (event) => {
     if (!(event.metaKey || event.ctrlKey)) return;
     const key = event.key.toLowerCase();
-    if (key === 'p' && !event.shiftKey) { event.preventDefault(); palette.open('files'); }
+    if (key === 'p') { event.preventDefault(); palette.open(event.shiftKey ? 'commands' : 'files'); }
     if (key === 'f' && event.shiftKey) { event.preventDefault(); palette.open('text'); }
   });
 
@@ -618,6 +646,7 @@ function setupChrome() {
   els.tabOutput.addEventListener('click', () => selectDock('output'));
   els.tabReport.addEventListener('click', () => selectDock('report'));
   els.tabLog.addEventListener('click', () => selectDock('log'));
+  els.tabBench.addEventListener('click', () => selectDock('bench'));
   els.arch.value = prefs.get('arch', els.arch.value);
   els.flags.value = prefs.get('flags', '');
   const rebuild = () => { if (state.active && kindOf(state.active) === 'cuda') liveCompile(state.active); };
@@ -648,7 +677,7 @@ function setupRipple() {
   const tools = createRippleTools({
     listFiles: refreshFiles,
     readText: async (path) => { const entry = await ensureOpen(path); renderTabs(); return entry.model.getValue(); },
-    kernelKindOf: kindOf,
+    kernelKindOf: fileKind,
     search: async (query) => (await api.search(query)).hits,
     confirmRun: (path) => askConfirm('Ripple wants to run a file', path),
     run: runFile,
@@ -663,11 +692,12 @@ function setupRipple() {
       prompt: /** @type {HTMLTextAreaElement} */ ($('prompt')), send: /** @type {HTMLButtonElement} */ ($('send')),
       quick: $('quick'), ctx: $('ctx'), perf: $('perf'),
     },
-    getPreset: () => els.preset.value,
-    systemPrompt: () => systemPrompt({
+    getRequest: () => ({ target: lab.target(), options: lab.chatOptions() }),
+    onPerf: (perf) => lab.noteChat(perf),
+    systemPrompt: () => [systemPrompt({
       active: state.active, kernel: state.active ? kindOf(state.active) : null,
       toolchain: state.toolchain, arch: els.arch.value, canRun: state.run.enabled,
-    }),
+    }), lab.chatInstruction()].filter(Boolean).join('\n'),
     tools,
   });
   agent.setQuick(QUICK_PROMPTS.general);
@@ -675,24 +705,56 @@ function setupRipple() {
   const pathOf = (model) => model.uri.path.replace(/^\//, '');
   registerInlineSuggestions({
     monaco,
-    getPreset: () => els.preset.value,
+    getRequest: () => ({ target: lab.target(), options: lab.completeOptions(), debounceMs: lab.debounceMs() }),
+    onAccepted: () => lab.noteAccepted(),
     isEnabled: () => state.suggest,
     onState: showSuggestState,
-    getLanguage: (model) => (kindOf(pathOf(model)) === 'triton' ? 'triton' : model.getLanguageId()),
+    getLanguage: (model) => (fileKind(pathOf(model)) === 'triton' ? 'triton' : model.getLanguageId()),
     getFindings: (model) => (state.results.get(pathOf(model))?.analysis?.lints || [])
       .filter((lint) => lint.src).slice(0, MAX_FINDINGS_FOR_SUGGESTIONS)
       .map((lint) => `${lint.code} at source line ${lint.src.line}`),
   });
 }
 
+/** Commands for Cmd/Ctrl+Shift+P. The first three change the mode. */
+function commands() {
+  const toggle = (button) => () => button.click();
+  return [
+    ...Object.entries(MODES).map(([id, name]) => ({
+      label: `Mode: ${name}`, detail: state.mode === id ? 'current' : MODE_DETAIL[id], run: () => setMode(id),
+    })),
+    { label: 'Go to file', hint: '⌘P', run: () => palette.open('files') },
+    { label: 'Search in files', hint: '⇧⌘F', run: () => palette.open('text') },
+    { label: 'New file', run: () => els.newFile.click() },
+    { label: 'Save file', hint: '⌘S', run: saveActive },
+    { label: 'Run or compile the active file', hint: '⌘↵', run: doPrimary },
+    { label: 'Ripple: Ask about selection', hint: '⌘L', run: askAboutSelection },
+    { label: `Inline suggestions: turn ${state.suggest ? 'off' : 'on'}`, run: toggle(els.toggleSuggest) },
+    { label: 'Lab: Run benchmark', detail: 'speed and accuracy of the active profile', run: () => { setMode('lab'); lab.runBenchmark(); } },
+    { label: `Kernel: Live compile: turn ${state.live ? 'off' : 'on'}`, run: toggle(els.toggleLive) },
+    { label: `Kernel: ${state.showDebugLines ? 'Hide' : 'Show'} PTX line info`, run: toggle(els.toggleDebug) },
+    { label: 'Kernel: Set baseline here', run: () => { if (state.active) { setBaseline(state.active); showResult(); } } },
+    { label: 'Kernel: Check toolchain', run: () => refreshToolchain(true) },
+  ];
+}
+
+const MODE_DETAIL = {
+  general: 'editor, run, search, Ripple',
+  kernel: 'adds PTX pane, live compile, kernel report',
+  lab: 'tune Ripple and benchmark it',
+};
+
 async function boot() {
   monaco = await loadMonaco();
   await registerKernelLanguages(monaco);
   setupEditors();
   setupChrome();
+  await loadLab();
   setupRipple();
   renderReport(els.report, { analysis: null, res: null, sourceName: '', onJump: jump });
-  await Promise.all([refreshFiles(), refreshToolchain(), loadPresets()]);
+  await Promise.all([refreshFiles(), refreshToolchain()]);
+  const mode = prefs.get('mode', 'general');
+  setMode(mode in MODES ? mode : 'general');
   updatePrimary();
   const remembered = prefs.get('active', '');
   const first = state.files.find((f) => f.path === remembered) || state.files.find((f) => /readme/i.test(f.path)) || state.files[0];

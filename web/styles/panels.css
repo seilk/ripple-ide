@@ -84,6 +84,47 @@
 .output .run-meta[data-failed] { color: var(--negative); }
 .output:empty::before { content: "Run a file to see its output here"; color: var(--text-3); font-family: var(--font-ui); font-size: var(--text-body); }
 
+/* ---------------------------------------------------------------- lab */
+.lab-body { overflow: auto; padding: var(--space-4); display: grid; gap: var(--space-6); align-content: start; }
+.lab-section { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3) var(--space-4); }
+.lab-section h3 { grid-column: 1 / -1; font-size: var(--text-body); font-weight: 500; color: var(--text); }
+.lab-profile { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--space-2); align-items: center; }
+.lab-field { display: grid; gap: var(--space-1); min-width: 0; font-size: var(--text-meta); color: var(--text-3); }
+.lab-wide, .lab-fixed, .lab-session { grid-column: 1 / -1; }
+.lab-fixed, .lab-session { color: var(--text-2); overflow-wrap: anywhere; }
+.lab-input { display: flex; align-items: center; gap: var(--space-2); }
+.lab-unit { font: 400 var(--text-meta) var(--font-code); color: var(--text-3); }
+.lab-body input, .lab-body select, .lab-body textarea {
+  width: 100%; min-width: 0; padding: 0 var(--space-2); background: var(--surface-raised); border: 1px solid var(--hairline);
+  border-radius: var(--radius-control); font: 400 var(--text-meta) var(--font-code); color: var(--text);
+  transition: border-color var(--duration) var(--ease);
+}
+.lab-body input, .lab-body select { height: var(--row-h); }
+.lab-body textarea { padding: var(--space-2); line-height: 16px; resize: vertical; }
+.lab-body input:hover, .lab-body select:hover, .lab-body textarea:hover { border-color: var(--hairline-strong); }
+.lab-body input:disabled { color: var(--text-2); border-color: transparent; background: none; padding-left: 0; font: 500 var(--text-body) var(--font-ui); }
+.lab-body .quiet { height: var(--row-h); }
+.lab-body .quiet:disabled { color: var(--text-3); cursor: not-allowed; }
+.lab-error { color: var(--negative); min-height: 16px; }
+
+.bench-panel { overflow: auto; padding: var(--space-4) var(--space-6) var(--space-8); }
+.bench-panel[hidden] { display: none; }
+.bench-bar { display: flex; align-items: center; gap: var(--space-4); margin-bottom: var(--space-4); color: var(--text-3); }
+.bench-table { border-collapse: collapse; font: 400 var(--text-meta)/20px var(--font-code); }
+.bench-table th { padding: 0 var(--space-6) var(--space-2) 0; font: 400 var(--text-meta) var(--font-ui); color: var(--text-3); text-align: left; white-space: nowrap; }
+.bench-table td { padding: var(--space-1) var(--space-6) var(--space-1) 0; white-space: nowrap; border-top: 1px solid var(--hairline); }
+.bench-table td:first-child { font-family: var(--font-ui); font-size: var(--text-body); }
+.bench-table tr[data-baseline] td:first-child { color: var(--text); }
+.bench-table .delta { margin-left: var(--space-2); }
+.bench-table td .mono { color: var(--text-3); }
+.bench-cases { margin-top: var(--space-4); font-size: var(--text-meta); color: var(--text-3); }
+.bench-cases summary { cursor: pointer; }
+.bench-cases ul { margin-top: var(--space-2); display: grid; gap: 2px; }
+.bench-cases li { display: grid; grid-template-columns: 40px 152px 56px minmax(0, 1fr); gap: var(--space-3); align-items: baseline; }
+.bench-cases li[data-pass] span:first-child { color: var(--positive); }
+.bench-cases li:not([data-pass]) span:first-child { color: var(--negative); }
+.bench-got { font: 400 var(--text-meta) var(--font-code); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---------------------------------------------------------------- Ripple */
 .chat { overflow: auto; padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-4); }
 .chat-empty { margin: auto 0; display: grid; gap: var(--space-1); color: var(--text-3); }
@@ -132,7 +173,7 @@
 .palette input { height: 36px; padding: 0 var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-raised); }
 .palette input:focus { outline: none; border-color: var(--hairline-strong); }
 .palette ul { overflow: auto; display: grid; gap: 2px; }
-.palette-row { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: var(--space-4); align-items: center; width: 100%; height: var(--row-h); padding: 0 var(--space-3); border: 0; border-radius: var(--radius-control); background: none; text-align: left; color: var(--text-2); }
+.palette-row { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; gap: var(--space-4); align-items: center; width: 100%; height: var(--row-h); padding: 0 var(--space-3); border: 0; border-radius: var(--radius-control); background: none; text-align: left; color: var(--text-2); }
 .palette-row[aria-selected="true"], .palette-row:hover { background: var(--surface-raised); color: var(--text); }
 .palette-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font: 400 var(--text-meta) var(--font-code); }
 .palette-none { padding: var(--space-2) var(--space-3); color: var(--text-3); }

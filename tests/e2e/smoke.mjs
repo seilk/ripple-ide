@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -27,6 +28,27 @@ for (let i = 0; i < 50; i += 1) {
   try { if ((await fetch(`${base}/api/presets`)).ok) break; } catch { /* not up yet */ }
   await new Promise((r) => setTimeout(r, 100));
 }
+
+// A stand-in for a locally tuned Ripple server: always the same answer, after a short delay.
+const FAKE_PORT = PORT + 2;
+const fakeSeen = {};
+const fake = createServer((request, response) => {
+  let raw = '';
+  request.on('data', (chunk) => { raw += chunk; });
+  request.on('end', () => setTimeout(() => {
+    const body = JSON.parse(raw);
+    if (!body.stream) Object.assign(fakeSeen, body); // keep the last suggestion request
+    const text = 'blockIdx.x * blockDim.x + threadIdx.x;';
+    if (!body.stream) {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { content: text } }] }));
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    for (const word of ['tuned ', 'answer']) response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: word } }] })}\n\n`);
+    response.end(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 2 } })}\n\ndata: [DONE]\n\n`);
+  }, 30));
+}).listen(FAKE_PORT, '127.0.0.1');
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
 const problems = [];
@@ -56,6 +78,13 @@ try {
       editor.focus();
     });
     await page.keyboard.type(text, { delay: 15 });
+  };
+  const setMode = async (name) => {
+    await page.keyboard.press('ControlOrMeta+Shift+p');
+    await page.waitForSelector('#palette[open]');
+    await page.keyboard.type(`Mode: ${name}`);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction((n) => document.querySelector('#mode').textContent === n, name);
   };
   const metric = (fn, label) => page.locator(`.fn[data-fn="${fn}"] [data-metric="${label}"] dd span`).first().innerText();
 
@@ -103,6 +132,11 @@ try {
     await page.waitForSelector('#palette[open]');
     await page.keyboard.type('saxpy.cu');
     await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.tab[aria-selected="true"]')?.title === 'kernels/saxpy.cu');
+    assert.equal(await page.locator('.ptx-pane').isVisible(), false); // General mode: a .cu file is just a source file
+    assert.equal(await page.locator('#language').innerText(), 'CUDA');
+    assert.match(await page.locator('#status').innerText(), /Kernel mode adds the PTX pane/);
+    await setMode('Kernel');
     await page.waitForSelector('.fn[data-fn="saxpy"]'); // no click on Compile: live compile
     assert.equal(await activeTab(), 'kernels/saxpy.cu');
     assert.equal(await page.locator('.ptx-pane').isVisible(), true);
@@ -115,10 +149,16 @@ try {
   });
 
   await step('line info is folded away until asked for', async () => {
-    assert.doesNotMatch(await page.locator('#ptx-editor .view-lines').innerText(), /\.loc/);
+    // Folded lines leave the PTX editor with fewer view lines than the model has.
+    const folded = () => page.evaluate(() => {
+      const editor = window.monaco.editor.getEditors().find((e) => e.getContainerDomNode().id === 'ptx-editor');
+      return editor.getModel().getLineCount() - editor._getViewModel().getLineCount();
+    });
+    assert.ok(await folded() >= 10);
     await page.locator('#toggle-debug').click();
-    await page.waitForFunction(() => /\.loc/.test(document.querySelector('#ptx-editor .view-lines').innerText));
+    assert.equal(await folded(), 0);
     await page.locator('#toggle-debug').click();
+    assert.ok(await folded() >= 10);
   });
 
   await step('links a source line to its PTX lines and marks the source', async () => {
@@ -280,6 +320,51 @@ try {
   });
   await page.screenshot({ path: join(SHOTS, 'ripple-1440.png') });
 
+  await step('Ripple lab: a profile change applies at once and the benchmark measures it', async () => {
+    await setMode('Ripple lab');
+    assert.equal(await page.locator('#lab-pane').isVisible(), true);
+    assert.equal(await page.locator('.ptx-pane').isVisible(), false);
+    assert.equal(await page.locator('#toolchain').isVisible(), false);
+    assert.equal(await page.locator('#tab-bench').getAttribute('aria-selected'), 'true');
+    await page.locator('#bench-run').click();
+    await page.waitForSelector('.bench-table tbody tr');
+    const first = await page.locator('.bench-table tbody tr').first().innerText();
+    assert.match(first, /Mock Ripple \(offline\)\s+9\/12/); // the idiom table knows 9 of the 12 cases
+    assert.match(first, /baseline/);
+
+    // A copy of the profile, pointed at a local stand-in for a tuned Ripple server.
+    await page.locator('#lab-duplicate').click();
+    await page.locator('#lab-endpoint').selectOption('custom');
+    await page.locator('#lab-url').fill(`http://127.0.0.1:${FAKE_PORT}/v1`);
+    await page.locator('#lab-model').fill('ripple-opt');
+    await page.locator('#lab-name').fill('Tuned runtime');
+    await page.locator('#lab-tokens').fill('48');
+    await page.locator('#lab-extraBody').fill('{"top_k": 20}');
+    assert.equal(await page.locator('#preset').evaluate((el) => el.selectedOptions[0].textContent), 'Tuned runtime');
+    await page.locator('#bench-run').click();
+    await page.waitForFunction(() => document.querySelectorAll('.bench-table tbody tr').length === 2);
+    const tuned = await page.locator('.bench-table tbody tr').first().innerText();
+    assert.match(tuned, /Tuned runtime\s+2\/12/); // the stand-in gives one fixed answer; it fits two patterns
+    assert.equal(await page.locator('.bench-table tbody tr').first().locator('.delta[data-dir="up"]').first().innerText(), '\u22127');
+    assert.match(tuned, /\d+ ms\+\d+/); // slower than the offline mock, and the table says so
+    assert.deepEqual([fakeSeen.model, fakeSeen.max_tokens, fakeSeen.top_k], ['ripple-opt', 48, 20]);
+    await page.screenshot({ path: join(SHOTS, 'lab-1440.png') });
+
+    // The same profile now drives the editor: the suggestion comes from the stand-in server.
+    await openFromTree('hello.py');
+    await typeAtEnd('\nindex = ');
+    await page.waitForFunction(() => /Tab accepts \(Ripple, \d+ ms\)/.test(document.querySelector('#suggest-state').textContent));
+    await page.keyboard.press('Tab');
+    assert.match(await modelText('hello.py'), /index = blockIdx\.x \* blockDim\.x \+ threadIdx\.x;$/);
+    await page.waitForFunction(() => /Suggestions: \d+ shown, [3-9] accepted/.test(document.querySelector('.lab-session').textContent));
+
+    await page.locator('#preset').selectOption('mock');
+    assert.equal(await page.locator('#lab-name').inputValue(), 'Mock Ripple (offline)');
+    await setMode('General');
+    assert.equal(await page.locator('#lab-pane').isVisible(), false);
+    assert.equal(await page.locator('#tab-bench').isVisible(), false);
+  });
+
   await step('no horizontal overflow at 1024 and 1440', async () => {
     for (const width of [1024, 1440]) {
       await page.setViewportSize({ width, height: 800 });
@@ -297,6 +382,7 @@ try {
   if (problems.length) console.error(problems.join('\n'));
 } finally {
   await browser.close();
+  fake.close();
   server.kill();
 }
 process.exit(failed ? 1 : 0);

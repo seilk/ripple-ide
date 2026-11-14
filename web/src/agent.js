@@ -94,12 +94,13 @@ function formatTokens(n) {
  * @param {{
  *   els: {chat: HTMLElement, form: HTMLFormElement, prompt: HTMLTextAreaElement, send: HTMLButtonElement,
  *         quick: HTMLElement, ctx: HTMLElement, perf: HTMLElement},
- *   getPreset: () => string,
+ *   getRequest: () => {target: object, options: object},
+ *   onPerf?: (perf: {ttft: number, tokps: number}) => void,
  *   systemPrompt: () => string,
  *   tools: Record<string, (args: any) => Promise<unknown>>,
  * }} deps
  */
-export function createAgent({ els, getPreset, systemPrompt, tools }) {
+export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
   /** @type {Array<object>} */
   const history = [];
   /** @type {AbortController|null} */
@@ -160,7 +161,8 @@ export function createAgent({ els, getPreset, systemPrompt, tools }) {
     let chunks = 0;
     let usage = null;
 
-    await streamChat({ preset: getPreset(), messages: [{ role: 'system', content: systemPrompt() }, ...history], tools: TOOLS },
+    const { target, options } = getRequest();
+    await streamChat({ ...target, options, messages: [{ role: 'system', content: systemPrompt() }, ...history], tools: TOOLS },
       (event) => {
         if (event.usage) usage = event.usage;
         const delta = event.choices?.[0]?.delta;
@@ -182,8 +184,10 @@ export function createAgent({ els, getPreset, systemPrompt, tools }) {
     if (firstAt) {
       const tokens = usage?.completion_tokens ?? chunks;
       const seconds = Math.max((ended - firstAt) / 1000, 0.001);
-      els.perf.textContent = `first token ${Math.round(firstAt - started)} ms, ${(tokens / seconds).toFixed(0)} tok/s`;
+      const perf = { ttft: Math.round(firstAt - started), tokps: Math.round(tokens / seconds) };
+      els.perf.textContent = `first token ${perf.ttft} ms, ${perf.tokps} tok/s`;
       els.perf.dataset.live = '1';
+      onPerf?.(perf);
     }
     if (usage?.prompt_tokens != null) els.ctx.textContent = `${formatTokens(usage.prompt_tokens)} of ${formatTokens(CONTEXT_TOKENS)} tokens`;
     if (!message.content) say.remove();

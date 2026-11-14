@@ -18,6 +18,7 @@ MAX_SUFFIX_CHARS = 1500
 MAX_BODY_CHARS = 400_000
 MAX_FINDINGS = 8
 MAX_LINES = 10
+MAX_SYSTEM_EXTRA_CHARS = 2000
 MAX_TOKENS = 192
 TEMPERATURE = 0.2
 
@@ -41,6 +42,8 @@ class CompletionRequest:
     prefix: str
     suffix: str
     findings: tuple[str, ...] = ()
+    max_lines: int = MAX_LINES
+    system_extra: str = ""
 
     @property
     def line_prefix(self) -> str:
@@ -51,7 +54,25 @@ class CompletionRequest:
         return self.suffix.split("\n", 1)[0]
 
 
+def _bounded(options: dict, name: str, default: int, low: int, high: int) -> int:
+    if options.get(name) is None:
+        return default
+    try:
+        value = int(options[name])
+    except (TypeError, ValueError):
+        raise ValueError(f"options.{name} must be a whole number") from None
+    if not low <= value <= high:
+        raise ValueError(f"options.{name} must be between {low} and {high}")
+    return value
+
+
 def parse_request(body: dict) -> CompletionRequest:
+    """`options` carries the lab settings: how much context to send and how to trim the answer."""
+    options = body.get("options") or {}
+    if not isinstance(options, dict):
+        raise ValueError("options must be an object")
+    prefix_chars = _bounded(options, "prefix_chars", MAX_PREFIX_CHARS, 200, 40_000)
+    suffix_chars = _bounded(options, "suffix_chars", MAX_SUFFIX_CHARS, 0, 16_000)
     language = body.get("language")
     prefix = body.get("prefix")
     suffix = body.get("suffix", "")
@@ -67,9 +88,11 @@ def parse_request(body: dict) -> CompletionRequest:
     return CompletionRequest(
         path=str(body.get("path", ""))[:200],
         language=language,
-        prefix=prefix[-MAX_PREFIX_CHARS:],
-        suffix=suffix[:MAX_SUFFIX_CHARS],
+        prefix=prefix[-prefix_chars:],
+        suffix=suffix[:suffix_chars],
         findings=tuple(str(item)[:200] for item in findings[:MAX_FINDINGS]),
+        max_lines=_bounded(options, "max_lines", MAX_LINES, 1, 40),
+        system_extra=str(options.get("system_extra") or "")[:MAX_SYSTEM_EXTRA_CHARS],
     )
 
 
@@ -82,6 +105,8 @@ def build_messages(req: CompletionRequest) -> list[dict]:
         "Write the text that belongs at the cursor."
     )
     system = SYSTEM_PROMPT + (KERNEL_RULES if req.language in KERNEL_LANGUAGES else "")
+    if req.system_extra.strip():
+        system += " " + req.system_extra.strip()
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -114,7 +139,7 @@ def clean_completion(text: str, req: CompletionRequest) -> str:
             text = text[:cut].rstrip()
 
     lines = text.split("\n")
-    return "\n".join(lines[:MAX_LINES]).rstrip() if text.strip() else ""
+    return "\n".join(lines[:req.max_lines]).rstrip() if text.strip() else ""
 
 
 # ------------------------------------------------------------------ mock idioms

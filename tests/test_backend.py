@@ -451,3 +451,88 @@ def test_http_run_is_off_on_a_shared_host_unless_allowed(tmp_path):
         off.RequestHandlerClass.run_enabled = True
 
     assert status == 403 and "--allow-run" in body
+
+
+# ---------------------------------------------------------------- lab: endpoints and overrides
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "10.0.0.5", "192.168.1.9", "100.99.1.2", "::1"])
+def test_local_and_private_endpoint_hosts_are_allowed(host):
+    assert ripple_api.endpoint_host_allowed(host)
+
+
+@pytest.mark.parametrize("host", ["example.com", "8.8.8.8", "metadata.internal", "100.128.0.1"])
+def test_public_or_named_endpoint_hosts_are_refused(host):
+    assert not ripple_api.endpoint_host_allowed(host)
+    assert ripple_api.endpoint_host_allowed(host, frozenset({host}))
+
+
+def test_resolve_target_accepts_a_custom_local_endpoint_and_refuses_others():
+    target = ripple_api.resolve_target({"endpoint": {"base_url": "http://127.0.0.1:8001/v1/", "model": "ripple-opt"}})
+    assert target["base_url"] == "http://127.0.0.1:8001/v1" and target["model"] == "ripple-opt"
+    assert ripple_api.resolve_target({"preset": "mock"}) is ripple_api.PRESETS["mock"]
+    for body in ({"endpoint": {"base_url": "http://example.com/v1", "model": "m"}},
+                 {"endpoint": {"base_url": "file:///etc/passwd", "model": "m"}},
+                 {"endpoint": {"base_url": "http://127.0.0.1:8001/v1", "model": "bad model"}},
+                 {"preset": "nope"}):
+        with pytest.raises(ripple_api.UpstreamError):
+            ripple_api.resolve_target(body)
+    with pytest.raises(ripple_api.UpstreamError, match="--allow-custom-endpoints"):
+        ripple_api.resolve_target({"endpoint": {"base_url": "http://127.0.0.1:1/v1", "model": "m"}}, custom_enabled=False)
+
+
+def test_options_become_request_overrides_without_reserved_keys():
+    overrides = ripple_api.parse_options({"options": {
+        "temperature": 0.1, "top_p": 0.9, "max_tokens": 64,
+        "extra_body": {"top_k": 20, "model": "evil", "messages": [], "stream": True}}})
+
+    assert overrides == {"top_k": 20, "temperature": 0.1, "top_p": 0.9, "max_tokens": 64}
+    for bad in ({"temperature": 9}, {"max_tokens": 0}, {"top_p": "x"}, {"extra_body": [1]}):
+        with pytest.raises(ripple_api.UpstreamError):
+            ripple_api.parse_options({"options": bad})
+
+
+def test_completion_options_change_context_size_line_limit_and_prompt():
+    req = complete.parse_request({"language": "python", "prefix": "a" * 5000, "suffix": "b" * 900, "options": {
+        "prefix_chars": 300, "suffix_chars": 0, "max_lines": 2, "system_extra": "Prefer one line."}})
+
+    assert (len(req.prefix), len(req.suffix), req.max_lines) == (300, 0, 2)
+    assert complete.build_messages(req)[0]["content"].endswith("Prefer one line.")
+    assert complete.clean_completion("one\ntwo\nthree", req) == "one\ntwo"
+    with pytest.raises(ValueError, match="prefix_chars"):
+        complete.parse_request({"language": "python", "prefix": "", "options": {"prefix_chars": 5}})
+
+
+def test_http_custom_endpoint_gets_the_overrides(ide):
+    import http.server
+    seen = {}
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            answer = json.dumps({"choices": [{"message": {"content": "threadIdx.x;"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+        def log_message(self, *args):
+            pass
+
+    upstream = http.server.HTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    try:
+        status, body, _ = _call(f"{ide}/api/complete", "POST", {
+            "endpoint": {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple-opt"},
+            "language": "cuda", "prefix": "int i = ", "suffix": "",
+            "options": {"temperature": 0.0, "max_tokens": 32, "extra_body": {"top_k": 5}}})
+    finally:
+        upstream.shutdown()
+
+    assert status == 200 and json.loads(body)["completion"] == "threadIdx.x;"
+    assert (seen["model"], seen["temperature"], seen["max_tokens"], seen["top_k"], seen["stream"]) == (
+        "ripple-opt", 0.0, 32, 5, False)
+    assert _call(f"{ide}/api/complete", "POST", {"endpoint": {"base_url": "http://example.com/v1", "model": "m"},
+                                                   "language": "cuda", "prefix": "x"})[0] == 400
+    assert json.loads(_call(f"{ide}/api/presets")[1])["custom_endpoints"] is True

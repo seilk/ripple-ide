@@ -29,6 +29,22 @@ python3 server.py
 
 With vLLM this is `--reasoning-parser ripple --enable-auto-tool-choice --tool-call-parser ripple`.
 
+## Trying a runtime change from inside the IDE
+
+1. Start the changed runtime on its own port, next to the current one.
+2. In the IDE: `⇧⌘P`, `Mode: Ripple lab`. Duplicate a profile, set Endpoint to
+   `Custom URL`, and enter the new port. Name it after the change.
+3. `Run benchmark` on the old profile, then on the new one. The new row shows
+   its change in latency, tokens per second and cases passed against the old.
+4. Pick the new profile in the top bar and keep working. Suggestions and chat
+   now use the changed runtime, and the session line shows real-use latency.
+
+A custom URL must be on localhost or a private address. Fields the runtime
+understands beyond the OpenAI ones go in `Extra request body`. The IDE does not
+restart or reconfigure the runtime process: settings that need a restart (for
+example the KV cache type or speculative decoding) are a new port and a new
+profile.
+
 ## Inline suggestions
 
 The same endpoint serves ghost text: one short request per pause in typing,

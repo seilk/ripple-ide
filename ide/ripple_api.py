@@ -7,6 +7,7 @@ runs without a model.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -16,10 +17,14 @@ import urllib.request
 from collections import Counter
 from collections.abc import Iterator
 from http.client import HTTPResponse
+from urllib.parse import urlparse
 
 UPSTREAM_TIMEOUT_S = 900
 COMPLETE_TIMEOUT_S = 30
 RIPPLE_CONTEXT = 1_048_576
+RESERVED_BODY_KEYS = frozenset({"model", "messages", "stream", "stream_options", "tools", "tool_choice"})
+MODEL_NAME_RE = re.compile(r"^[\w./:@+-]{1,200}$")
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")  # Tailscale addresses
 
 PRESETS: dict[str, dict] = {
     "mock": {
@@ -85,6 +90,7 @@ def public_presets() -> list[dict]:
             "label": p["label"],
             "model": p["model"],
             "context": RIPPLE_CONTEXT,
+            "base_url": p["base_url"],
             "ready": pid != "openrouter" or preset_key(p) is not None,
             "note": p["note"],
         }
@@ -92,7 +98,69 @@ def public_presets() -> list[dict]:
     ]
 
 
-def open_upstream(preset: dict, body: dict) -> HTTPResponse:
+def endpoint_host_allowed(host: str, extra_hosts: frozenset[str] = frozenset()) -> bool:
+    """Custom endpoints are for a local Ripple: localhost or a private address."""
+    if host == "localhost" or host in extra_hosts:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or (address.version == 4 and address in _CGNAT)
+
+
+def resolve_target(body: dict, custom_enabled: bool = True, extra_hosts: frozenset[str] = frozenset()) -> dict:
+    """The endpoint a request goes to: a preset by id, or a custom local endpoint."""
+    endpoint = body.get("endpoint")
+    if endpoint is None:
+        preset = PRESETS.get(str(body.get("preset", "")))
+        if preset is None:
+            raise UpstreamError(400, f"unknown preset; use one of {sorted(PRESETS)}")
+        return preset
+    if not custom_enabled:
+        raise UpstreamError(403, "custom endpoints are off on this server; start it with --allow-custom-endpoints")
+    if not isinstance(endpoint, dict):
+        raise UpstreamError(400, "endpoint must be an object")
+    url = urlparse(str(endpoint.get("base_url", "")).strip())
+    model = str(endpoint.get("model", "")).strip()
+    if url.scheme not in ("http", "https") or not url.hostname:
+        raise UpstreamError(400, "endpoint.base_url must be an http(s) URL such as http://127.0.0.1:8000/v1")
+    if not endpoint_host_allowed(url.hostname.lower(), extra_hosts):
+        raise UpstreamError(400, "a custom endpoint must be on localhost or a private address "
+                                 "(or a host named with --allow-endpoint-host)")
+    if not MODEL_NAME_RE.match(model):
+        raise UpstreamError(400, "endpoint.model is missing or has characters that are not allowed")
+    return {"label": "Custom endpoint", "base_url": url.geturl().rstrip("/"), "model": model,
+            "key_env": ["RIPPLE_RUNTIME_KEY"], "extra": {}}
+
+
+def parse_options(body: dict) -> dict:
+    """Request-body overrides from the lab: sampling numbers plus free extra fields."""
+    raw = body.get("options") or {}
+    if not isinstance(raw, dict):
+        raise UpstreamError(400, "options must be an object")
+    extra = raw.get("extra_body") or {}
+    if not isinstance(extra, dict):
+        raise UpstreamError(400, "options.extra_body must be an object")
+    out = {key: value for key, value in extra.items() if key not in RESERVED_BODY_KEYS}
+    try:
+        for name, low, high in (("temperature", 0.0, 2.0), ("top_p", 0.0, 1.0)):
+            if raw.get(name) is not None:
+                value = float(raw[name])
+                if not low <= value <= high:
+                    raise UpstreamError(400, f"options.{name} must be between {low} and {high}")
+                out[name] = value
+        if raw.get("max_tokens") is not None:
+            tokens = int(raw["max_tokens"])
+            if not 1 <= tokens <= 8192:
+                raise UpstreamError(400, "options.max_tokens must be between 1 and 8192")
+            out["max_tokens"] = tokens
+    except (TypeError, ValueError) as exc:
+        raise UpstreamError(400, f"options has a value that is not a number: {exc}") from exc
+    return out
+
+
+def open_upstream(preset: dict, body: dict, overrides: dict | None = None) -> HTTPResponse:
     payload = {
         "model": preset["model"],
         "messages": body["messages"],
@@ -103,9 +171,7 @@ def open_upstream(preset: dict, body: dict) -> HTTPResponse:
     if body.get("tools"):
         payload["tools"] = body["tools"]
         payload["tool_choice"] = "auto"
-    for name in ("temperature", "top_p", "max_tokens"):
-        if name in body:
-            payload[name] = body[name]
+    payload.update(overrides or {})
 
     return _post(preset, payload, "text/event-stream", UPSTREAM_TIMEOUT_S)
 
@@ -133,10 +199,11 @@ def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPRes
         raise UpstreamError(502, f"cannot reach {preset['base_url']}: {reason}") from exc
 
 
-def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperature: float) -> str:
+def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperature: float,
+                  overrides: dict | None = None) -> str:
     """One short non-streamed answer, for inline completion."""
-    payload = {"model": preset["model"], "messages": messages, "stream": False,
-               "max_tokens": max_tokens, "temperature": temperature}
+    payload = {"max_tokens": max_tokens, "temperature": temperature, **(overrides or {}),
+               "model": preset["model"], "messages": messages, "stream": False}
     try:
         with _post(preset, payload, "application/json", COMPLETE_TIMEOUT_S) as response:
             data = json.load(response)
