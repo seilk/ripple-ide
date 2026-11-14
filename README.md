@@ -138,6 +138,10 @@ Before the request was shaped for a chat model, the same suggestion cases gave
 empty answers (the model reasoned first and used up its tokens), then 7 of 12
 at a median of 1106 ms with reasoning switched off only. The prefix cache halves
 latency in a large file (124 ms against 228 ms for the same 2000-token context).
+The line pattern (structured output by regular expression) does not change the
+time of a request; it removes empty answers. On 36 requests that stop inside a
+word, Ripple gave a suggestion in 27 without the pattern and in 36 with it, at a
+median of 68 ms and 69 ms (`tools/bench-pattern.py`).
 Suggestions slow down a lot while a chat answer is being generated on the same
 GPU: one run measured 0.4 to 3.6 s per suggestion during chat traffic.
 
