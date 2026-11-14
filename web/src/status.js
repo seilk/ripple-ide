@@ -13,7 +13,6 @@ const POLL_OPEN_MS = 1000;
 const SPARK_BARS = 40;
 const SPARK_FLOOR = 50; // tok/s that fills the graph when the server is slower than this
 
-const gb = (mib) => (mib / 1024).toFixed(0);
 const count = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n)));
 const share = (part, whole) => (whole > 0 ? part / whole : null);
 
@@ -36,7 +35,6 @@ export function statusView(status, before) {
     ? Math.max(0, m.generation_tokens - before.metrics.generation_tokens) : 0;
   const seconds = before?.at && status.at ? status.at - before.at : 0;
   const tokps = seconds > 0 ? Math.round(made / seconds) : 0;
-  const gpu = (status.gpus || [])[0];
   const cached = share(m.prompt_tokens_cached ?? m.prefix_cache_hits ?? 0, m.prompt_tokens ?? m.prefix_cache_queries ?? 0);
   const kept = share(m.spec_accepted_tokens ?? 0, m.spec_draft_tokens ?? 0);
   const none = { text: '–', fill: null };
@@ -47,8 +45,6 @@ export function statusView(status, before) {
       endpoint: { text: status.detail || 'no answer' },
       throughput: { text: m.generation_tokens === undefined ? '–' : tokps > 0 ? `${tokps} tok/s` : 'idle' },
       requests: m.running === undefined ? none : { text: `${m.running} running, ${m.waiting ?? 0} waiting` },
-      memory: gpu ? { text: `${gb(gpu.memory_used_mib)} of ${gb(gpu.memory_total_mib)} GB`, fill: share(gpu.memory_used_mib, gpu.memory_total_mib) } : none,
-      load: gpu ? { text: `${Math.round(gpu.utilization)} %, ${Math.round(gpu.power_w)} W`, fill: gpu.utilization / 100 } : none,
       cache: cached === null ? none : { text: `${Math.round(cached * 100)} % of prompt tokens reused`, fill: cached },
       draft: m.spec_drafts > 0
         ? { text: `${(1 + m.spec_accepted_tokens / m.spec_drafts).toFixed(2)} tokens per step, ${Math.round((kept ?? 0) * 100)} % kept`, fill: kept }
@@ -61,8 +57,7 @@ export function statusView(status, before) {
 }
 
 const ROWS = [
-  ['requests', 'Requests'], ['memory', 'GPU memory'], ['load', 'GPU load'], ['cache', 'Prompt cache'],
-  ['draft', 'Draft model'], ['kv', 'KV cache'], ['generated', 'Generated'],
+  ['requests', 'Requests'], ['cache', 'Prompt cache'], ['draft', 'Draft model'], ['kv', 'KV cache'], ['generated', 'Generated'],
 ];
 
 /** Build the panel once. Later polls change text and transforms only. */
@@ -134,7 +129,7 @@ export function createRippleStatus({ button, panel, getTarget, getSession, onCha
   async function poll() {
     clearTimeout(timer);
     try {
-      const status = await api.rippleStatus({ ...getTarget(), gpus: !panel.hidden });
+      const status = await api.rippleStatus(getTarget());
       before = last && last.at ? last : before;
       last = status;
       if (status.at && before?.at) history = [...history.slice(1), statusView(status, before).tokps];
