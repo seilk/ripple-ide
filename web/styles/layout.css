@@ -256,6 +256,8 @@ body[data-resizing] .preview-pane iframe { pointer-events: none; } /* or the fra
 .pane-head b { color: var(--text); font-weight: 500; }
 .pane-head span { font-family: var(--font-code); overflow: hidden; text-overflow: ellipsis; }
 .pane-head .toggle { margin-left: auto; }
+.pane-close { margin-left: auto; flex: none; display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: var(--radius-tag); background: none; color: var(--text-3); font-size: var(--text-title); line-height: 1; transition: background-color var(--duration) var(--ease), color var(--duration) var(--ease); }
+.pane-close:hover { background: var(--surface-raised); color: var(--text); }
 
 .empty {
   position: absolute; inset: var(--row-h) 0 0; display: grid; place-content: center; gap: var(--space-1); text-align: center;

@@ -13,12 +13,11 @@ import json
 import os
 import re
 import time
-import urllib.error
-import urllib.request
 from collections import Counter
 from collections.abc import Iterator
-from http.client import HTTPResponse
 from urllib.parse import urlparse
+
+from ide.upstream import POOL, Response
 
 UPSTREAM_TIMEOUT_S = 900
 COMPLETE_TIMEOUT_S = 30
@@ -163,7 +162,7 @@ def parse_options(body: dict) -> dict:
     return out
 
 
-def open_upstream(preset: dict, body: dict, overrides: dict | None = None) -> HTTPResponse:
+def open_upstream(preset: dict, body: dict, overrides: dict | None = None) -> Response:
     payload = {
         "model": preset["model"],
         "messages": body["messages"],
@@ -179,7 +178,7 @@ def open_upstream(preset: dict, body: dict, overrides: dict | None = None) -> HT
     return _post(preset, payload, "text/event-stream", UPSTREAM_TIMEOUT_S)
 
 
-def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPResponse:
+def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> Response:
     headers = {"Content-Type": "application/json", "Accept": accept}
     key = preset_key(preset)
     if key:
@@ -187,16 +186,14 @@ def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPRes
     elif preset is PRESETS["openrouter"]:
         raise UpstreamError(401, "OPENROUTER_API_KEY is not set in the server environment")
 
-    request = urllib.request.Request(
-        preset["base_url"].rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers=headers,
-        method="POST",
-    )
     try:
-        return urllib.request.urlopen(request, timeout=timeout_s)  # noqa: S310 - fixed preset URLs
-    except urllib.error.HTTPError as exc:
-        raise UpstreamError(exc.code, f"upstream {exc.code}", exc.read().decode(errors="replace")[:4000]) from exc
+        response = POOL.request("POST", preset["base_url"].rstrip("/") + "/chat/completions",
+                                json.dumps(payload).encode(), headers, timeout_s)
+        if response.status >= 400:
+            with response:
+                detail = response.read().decode(errors="replace")[:4000]
+            raise UpstreamError(response.status, f"upstream {response.status}", detail)
+        return response
     except (OSError, http.client.HTTPException) as exc:
         # Refused, timed out, or accepted and then closed with no answer. The last one is
         # what a port forward does while the server behind it is still starting.
@@ -206,7 +203,7 @@ def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPRes
 
 
 def stream_once(preset: dict, messages: list[dict], max_tokens: int, overrides: dict | None = None,
-                prefill: str | None = None, stop: list[str] | None = None) -> HTTPResponse:
+                prefill: str | None = None, stop: list[str] | None = None) -> Response:
     """One streamed answer with no tools, for inline edit. Returns the upstream SSE response."""
     payload = {"max_tokens": max_tokens, "temperature": 0.0, **(overrides or {}),
                "model": preset["model"], "messages": messages, "stream": True,
@@ -257,9 +254,18 @@ def parse_metrics(text: str) -> dict:
     return out
 
 
+class _StatusError(Exception):
+    def __init__(self, code: int):
+        super().__init__(code)
+        self.code = code
+
+
 def _get(url: str, headers: dict) -> bytes:
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=STATUS_TIMEOUT_S) as response:  # noqa: S310
-        return response.read(2_000_000)
+    with POOL.request("GET", url, None, headers, STATUS_TIMEOUT_S) as response:
+        body = response.read()
+        if response.status >= 400:
+            raise _StatusError(response.status)
+        return body
 
 
 def check(preset: dict) -> dict:
@@ -277,12 +283,12 @@ def check(preset: dict) -> dict:
         try:  # vLLM and SGLang serve Prometheus text next to /v1
             status["metrics"] = parse_metrics(_get(base.removesuffix("/v1") + "/metrics", headers).decode(errors="replace"))
             status["at"] = time.time()
-        except (OSError, http.client.HTTPException, ValueError):
+        except (OSError, http.client.HTTPException, ValueError, _StatusError):
             pass
         return status
     except json.JSONDecodeError:
         return {"ok": True, "detail": f"{preset['model']} at {preset['base_url']}", "model": preset["model"], "metrics": {}}
-    except urllib.error.HTTPError as exc:
+    except _StatusError as exc:
         return {"ok": False, "detail": f"{preset['base_url']} answered {exc.code}"}
     except (OSError, http.client.HTTPException) as exc:
         reason = getattr(exc, "reason", None) or exc or type(exc).__name__
@@ -377,9 +383,10 @@ def _summarize_report(raw: str) -> str:
 
 def mock_plan(messages: list[dict]) -> tuple[str, str, tuple[str, dict] | None]:
     """Return (reasoning, content, tool_call) for the next mock turn."""
-    system = messages[0].get("content", "") if messages and messages[0].get("role") == "system" else ""
-    match = re.search(r"^Active file: (.+)$", system, re.MULTILINE)
-    active = match.group(1).strip() if match else None
+    system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+    found = re.findall(r"Active file: (.+)$", system, re.MULTILINE)
+    active = found[-1].strip() if found else None  # the newest editor state wins
+    messages = [m for m in messages if m.get("role") != "system"]
     last = messages[-1] if messages else {}
     asked = next((str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), "").lower()
 

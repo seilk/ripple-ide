@@ -45,9 +45,10 @@ function parseExtraBody(text) {
  *   presets: Array<{id: string, label: string, model: string, base_url: string, ready: boolean}>,
  *   defaultPreset: string, customEndpoints: boolean,
  *   onStatus: (text: string, kind?: string) => void,
+ *   onClose: () => void,
  * }} deps
  */
-export function createLab({ pane, benchPanel, select, presets, defaultPreset, customEndpoints, onStatus }) {
+export function createLab({ pane, benchPanel, select, presets, defaultPreset, customEndpoints, onStatus, onClose }) {
   /** @type {Array<any>} */
   let profiles = presets.map((preset) => ({ id: preset.id, name: preset.label, kind: 'preset', preset: preset.id, locked: true, values: { ...DEFAULTS } }));
   try {
@@ -212,7 +213,8 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
       current.append(fieldRow(field, profile));
     }
     pane.replaceChildren(
-      h('header', { class: 'pane-head' }, h('b', {}, 'Ripple lab'), h('span', {}, 'Changes apply to the next request')),
+      h('header', { class: 'pane-head' }, h('b', {}, 'Ripple lab'), h('span', {}, 'Changes apply to the next request'),
+        h('button', { id: 'lab-close', class: 'pane-close', type: 'button', 'aria-label': 'Close Ripple lab', title: 'Close Ripple lab', onclick: onClose }, '×')),
       h('div', { class: 'lab-body' },
         h('section', { class: 'lab-section' },
           h('div', { class: 'lab-profile' },

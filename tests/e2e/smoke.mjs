@@ -490,6 +490,9 @@ try {
 
     await page.locator('#preset').selectOption('mock');
     assert.equal(await page.locator('#lab-name').inputValue(), 'Mock Ripple (offline)');
+    await page.locator('#lab-close').click(); // the close button goes back to the mode before the lab
+    assert.equal(await page.locator('#mode').innerText(), 'Kernel');
+    assert.equal(await page.locator('#lab-pane').isVisible(), false);
     await setMode('General');
     assert.equal(await page.locator('#lab-pane').isVisible(), false);
     assert.equal(await page.locator('#tab-bench').isVisible(), false);

@@ -10,6 +10,8 @@ const CONTEXT_TOKENS = 1_048_576;
 const MAX_CHATS = 20;
 const MAX_STORED_CHARS = 1_500_000;
 const TITLE_CHARS = 36;
+// Calls that only look at things. A run of them in one answer starts together.
+const READ_ONLY = new Set(['list_files', 'read_file', 'search_files', 'compile_kernel']);
 
 export const TOOLS = [
   {
@@ -119,10 +121,11 @@ function formatTokens(n) {
  *   onPerf?: (perf: {ttft: number, tokps: number}) => void,
  *   onReview?: (changeId: string, row: HTMLElement) => void,
  *   systemPrompt: () => string,
+ *   editorState: () => string,
  *   tools: Record<string, (args: any) => Promise<unknown>>,
  * }} deps
  */
-export function createAgent({ els, getRequest, onPerf, onReview, systemPrompt, tools }) {
+export function createAgent({ els, getRequest, onPerf, onReview, systemPrompt, editorState, tools }) {
   /** @type {Array<{id: string, title: string, history: Array<any>}>} chats, newest first */
   let chats = [];
   try {
@@ -271,7 +274,10 @@ export function createAgent({ els, getRequest, onPerf, onReview, systemPrompt, t
     let usage = null;
 
     const { target, options } = getRequest();
-    await streamChat({ ...target, options, messages: [{ role: 'system', content: systemPrompt() }, ...current.history], tools: TOOLS },
+    // The rules first and unchanged, the conversation, then what is true in the editor now.
+    // A request that starts like the last one lets the server reuse its prefix cache.
+    const messages = [{ role: 'system', content: systemPrompt() }, ...current.history, { role: 'system', content: editorState() }];
+    await streamChat({ ...target, options, messages, tools: TOOLS },
       (event) => {
         if (event.usage) usage = event.usage;
         const delta = event.choices?.[0]?.delta;
@@ -333,16 +339,29 @@ export function createAgent({ els, getRequest, onPerf, onReview, systemPrompt, t
         const assistant = await modelTurn(block, running.signal);
         history.push(assistant);
         if (!assistant.tool_calls) return;
-        for (const call of assistant.tool_calls) {
-          const row = h('div', { class: 'tool', 'data-state': 'run' },
-            h('b', {}, call.function.name),
-            h('span', { class: 'arg' }, call.function.arguments.slice(0, 80)),
-            h('span', { class: 'state' }, 'Running'));
-          block.append(row);
-          scroll();
-          const content = await runTool(call, row);
-          history.push({ role: 'tool', tool_call_id: call.id, content });
+        const toolsStarted = performance.now();
+        const calls = assistant.tool_calls;
+        const rows = calls.map((call) => h('div', { class: 'tool', 'data-state': 'run' },
+          h('b', {}, call.function.name),
+          h('span', { class: 'arg' }, call.function.arguments.slice(0, 80)),
+          h('span', { class: 'state' }, 'Running')));
+        block.append(...rows);
+        scroll();
+        // Reads, searches and compiles next to each other run at the same time. A call that
+        // changes or runs something waits for everything before it and runs alone.
+        const results = new Array(calls.length);
+        for (let from = 0; from < calls.length;) {
+          let to = from + 1;
+          if (READ_ONLY.has(calls[from].function.name)) {
+            while (to < calls.length && READ_ONLY.has(calls[to].function.name)) to += 1;
+          }
+          const group = calls.slice(from, to).map((call, offset) => runTool(call, rows[from + offset]));
+          (await Promise.all(group)).forEach((content, offset) => { results[from + offset] = content; });
+          from = to;
         }
+        calls.forEach((call, index) => history.push({ role: 'tool', tool_call_id: call.id, content: results[index] })); // in the order asked
+        // How long the tools of this answer took, for the benchmark in tools/bench-agent-reads.mjs.
+        block.dataset.toolMs = String(Number(block.dataset.toolMs || 0) + Math.round(performance.now() - toolsStarted));
       }
       block.append(h('div', { class: 'msg-error' }, `Stopped after ${MAX_TURNS} tool rounds`));
     } catch (error) {

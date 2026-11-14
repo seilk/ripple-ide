@@ -868,3 +868,88 @@ def test_http_folder_delete(ide):
     assert _call(f"{ide}/api/folder?path=scratch", "DELETE")[0] == 400
     assert _call(f"{ide}/api/folder?path=..", "DELETE")[0] == 400
     assert _call(f"{ide}/api/folder?path=k.ptx", "DELETE")[0] == 400  # a file is not a folder
+
+
+# ---------------------------------------------------------------- kept connections to the Ripple server
+
+
+def _keepalive_upstream(drop_after_first: bool = False):
+    """A stand-in Ripple server that speaks HTTP/1.1 and counts the connections it gets."""
+    import http.server
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        connections = 0
+        requests = 0
+
+        def setup(self):
+            super().setup()
+            type(self).connections += 1
+
+        def do_POST(self):  # noqa: N802
+            type(self).requests += 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            answer = json.dumps({"choices": [{"message": {"content": " threadIdx.x;"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+            if drop_after_first and type(self).requests == 1:
+                self.close_connection = True  # hang up without saying so: the client's kept connection goes stale
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, Upstream
+
+
+def test_requests_to_ripple_share_one_connection(ide):
+    upstream, handler = _keepalive_upstream()
+    body = {"endpoint": {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple"},
+            "language": "cuda", "suffix": ""}
+    try:
+        answers = [json.loads(_call(f"{ide}/api/complete", "POST", {**body, "prefix": f"// {n}\nint i = "})[1])["completion"]
+                   for n in range(6)]
+    finally:
+        upstream.shutdown()
+
+    assert answers == ["threadIdx.x;"] * 6
+    assert (handler.requests, handler.connections) == (6, 1)
+
+
+def test_a_kept_connection_that_went_stale_is_replaced_without_an_error(ide):
+    upstream, handler = _keepalive_upstream(drop_after_first=True)
+    body = {"endpoint": {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple"},
+            "language": "cuda", "suffix": ""}
+    try:
+        first = _call(f"{ide}/api/complete", "POST", {**body, "prefix": "// a\nint i = "})
+        import time as _time
+        _time.sleep(0.2)  # let the stand-in close its side
+        second = _call(f"{ide}/api/complete", "POST", {**body, "prefix": "// b\nint i = "})
+    finally:
+        upstream.shutdown()
+
+    assert first[0] == 200 and second[0] == 200 and json.loads(second[1])["completion"] == "threadIdx.x;"
+    assert handler.connections == 2
+
+
+def test_a_stream_cut_short_does_not_put_its_connection_back():
+    from ide.upstream import Pool
+    upstream, handler = _keepalive_upstream()
+    pool = Pool()
+    url = f"http://127.0.0.1:{upstream.server_address[1]}/v1/chat/completions"
+    try:
+        with pool.request("POST", url, b"{}", {"Content-Type": "application/json"}) as response:
+            response.read(3)  # left half read, as when the browser stops a stream
+        with pool.request("POST", url, b"{}", {"Content-Type": "application/json"}) as response:
+            assert json.loads(response.read())["choices"]
+        with pool.request("POST", url, b"{}", {"Content-Type": "application/json"}) as response:
+            response.read()
+    finally:
+        upstream.shutdown()
+        pool.close()
+
+    assert pool.opened == 2  # the half-read one was dropped, the fully read one was used again

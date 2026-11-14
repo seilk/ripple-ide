@@ -135,6 +135,18 @@ latency in a large file (124 ms against 228 ms for the same 2000-token context).
 Suggestions slow down a lot while a chat answer is being generated on the same
 GPU: one run measured 0.4 to 3.6 s per suggestion during chat traffic.
 
+Three later changes, each measured before and after on the same server:
+
+| Change | Before | After |
+|--------|--------|-------|
+| Keep the connection to Ripple open (`ide/upstream.py`) | 54 to 59 ms per suggestion | 47 ms |
+| Keep the agent’s first message the same; the active file moves to the end | first token after 400 ms, 4 % of the prompt from cache | 61 ms, 98 % |
+| Same, in a real agent run that makes a file | 76 % from cache | 85 % |
+| Run read-only tool calls together | 590 ms for 8 calls | 314 ms |
+
+`tools/bench-latency.py`, `tools/bench-agent-cache.py`, `tools/bench-agent-make.mjs` and
+`tools/bench-agent-reads.mjs` produce these numbers.
+
 What the IDE does for speed: starts the model's reply for it so it answers
 without reasoning; stops at the end of the line; holds the answer to a line
 pattern so a half-typed word is finished; sends a context window whose start

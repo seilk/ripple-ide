@@ -91,13 +91,18 @@ export function createRippleTools(ide) {
   };
 }
 
-/** @param {{active: string|null, kernel: string|null, toolchain: any, arch: string, canRun: boolean, autoApply: boolean}} session */
-export function systemPrompt({ active, kernel, toolchain, arch, canRun, autoApply }) {
-  const tc = toolchain || {};
-  const lines = [
+/**
+ * The rules. This text is the first message of every request, so it must not change
+ * while a conversation runs: the server reuses its work on everything up to the first
+ * difference. What changes (the active file, the toolchain) is in `editorState`.
+ * @param {{canRun: boolean, autoApply: boolean}} session
+ */
+export function systemPrompt({ canRun, autoApply }) {
+  return [
     'You are Ripple, the coding model inside Ripple IDE. You work on the files of the open project with tools.',
     'Read before you edit. Use search_files to find things. Check your work: run the file or compile the kernel '
       + 'after an edit, and report what the tool showed. Do not claim a result that no tool showed.',
+    'When several tool calls do not depend on each other, such as reading a few files, make them in one step.',
     'When the user asks you to make, build or fix something, do it with the tools: create the file with write_file or '
       + 'change it with edit_file. Do not paste the code into the chat and stop there. Look at the files near it first, '
       + 'so a new file sits in the right folder and matches what is there.',
@@ -107,14 +112,25 @@ export function systemPrompt({ active, kernel, toolchain, arch, canRun, autoAppl
       ? 'Changes are applied at once, with no question to the user. The user can review and undo each one afterwards.'
       : 'The user sees a diff of every change and can reject it.',
     canRun ? 'run_file runs a .py, .js, .mjs or .sh file after the user allows it.' : 'run_file is off on this server.',
-    `Active file: ${active || '(none)'}`,
-  ];
+    'For a GPU kernel (.cu, .ptx, or Python with Triton) work like a kernel engineer: compile it, read the report, then act. '
+      + 'After every edit, compile again and read change_vs_baseline. The report counts instructions, loops, memory traffic '
+      + 'by state space, double-precision ops, thread-local memory and (with ptxas) registers and spills. It does not '
+      + 'measure run time.',
+    'The last message of each request is the editor state: the file that is open now, and the toolchain.',
+  ].join('\n');
+}
+
+/**
+ * What is true in the editor right now. It goes at the END of the request, after the
+ * conversation, so a new active file changes the last few tokens and not the first.
+ * @param {{active: string|null, kernel: string|null, toolchain: any, arch: string}} session
+ */
+export function editorState({ active, kernel, toolchain, arch }) {
+  const tc = toolchain || {};
+  const lines = [`Editor state. Active file: ${active || '(none)'}`];
   if (kernel) {
     lines.push(
-      `The active file is a GPU kernel (${kernel}). Work like a kernel engineer: compile it, read the report, then act. `
-        + 'After every edit, compile again and read change_vs_baseline. The report counts instructions, loops, memory '
-        + 'traffic by state space, double-precision ops, thread-local memory and (with ptxas) registers and spills. '
-        + 'It does not measure run time.',
+      `The active file is a GPU kernel (${kernel}).`,
       `Toolchain: frontend=${tc.cuda_frontend || 'none'}, ptxas=${tc.ptxas ? 'yes' : 'no'}, arch=${arch}, runner=${tc.runner || 'local'}`,
       tc.cuda_frontend === 'clang-nvptx' ? 'The PTX is a clang NVPTX preview, not nvcc output. Say so when it matters.' : '',
     );

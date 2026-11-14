@@ -17,7 +17,7 @@ import { analyzePtx, basename } from './ptx-analyze.js';
 import { renderReport } from './report.js';
 import { setupDividers } from './resize.js';
 import { createRippleStatus } from './status.js';
-import { createRippleTools, systemPrompt } from './ripple-tools.js';
+import { createRippleTools, editorState, systemPrompt } from './ripple-tools.js';
 import { createTree } from './tree.js';
 import { $, debounce, errorText, extOf, h, kernelKind, prefs } from './ui.js';
 
@@ -48,6 +48,7 @@ const state = {
   run: { enabled: false, /** @type {string[]} */ extensions: [] },
   /** @type {AbortController|null} */ running: null,
   /** @type {'general'|'kernel'|'lab'} */ mode: 'general',
+  /** @type {'general'|'kernel'} */ modeBeforeLab: 'general',
   /** @type {string|null} the page shown in the preview pane */ previewPath: null,
   previewVersion: 0,
   live: prefs.get('live', 'on') === 'on',
@@ -134,9 +135,18 @@ async function refreshFiles() {
   return state.files;
 }
 
-async function ensureOpen(path) {
+/** @type {Map<string, Promise<any>>} files that are being opened right now */
+const opening = new Map();
+
+/** The editor model of a file, loaded once even when two callers ask at the same time. */
+function ensureOpen(path) {
   const existing = state.open.get(path);
-  if (existing) return existing;
+  if (existing) return Promise.resolve(existing);
+  if (!opening.has(path)) opening.set(path, loadFile(path).finally(() => opening.delete(path)));
+  return opening.get(path);
+}
+
+async function loadFile(path) {
   const file = await api.read(path);
   const model = monaco.editor.createModel(file.content, languageFor(path), monaco.Uri.parse(`file:///${path}`));
   const entry = { model, savedVersion: model.getAlternativeVersionId() };
@@ -262,6 +272,7 @@ function setActive(path) {
 
 /** Change what the IDE is made of. The open files stay. */
 function setMode(mode) {
+  if (mode === 'lab' && state.mode !== 'lab') state.modeBeforeLab = state.mode; // where the lab's close button goes back to
   state.mode = mode;
   prefs.set('mode', mode);
   document.body.dataset.mode = mode;
@@ -552,6 +563,7 @@ async function loadLab() {
   lab = createLab({
     pane: $('lab-pane'), benchPanel: els.bench, select: els.preset, presets, defaultPreset: fallback,
     customEndpoints, onStatus: setStatus,
+    onClose: () => setMode(state.modeBeforeLab),
   });
 }
 
@@ -786,10 +798,12 @@ function setupRipple() {
     getRequest: () => ({ target: lab.target(), options: lab.chatOptions() }),
     onPerf: (perf) => lab.noteChat(perf),
     onReview: reviewChange,
-    systemPrompt: () => [systemPrompt({
+    systemPrompt: () => [systemPrompt({ canRun: state.run.enabled, autoApply: state.autoApply }), lab.chatInstruction()]
+      .filter(Boolean).join('\n'),
+    editorState: () => editorState({
       active: state.active, kernel: state.active ? kindOf(state.active) : null,
-      toolchain: state.toolchain, arch: els.arch.value, canRun: state.run.enabled, autoApply: state.autoApply,
-    }), lab.chatInstruction()].filter(Boolean).join('\n'),
+      toolchain: state.toolchain, arch: els.arch.value,
+    }),
     tools,
   });
   agent.setQuick(QUICK_PROMPTS.general);
