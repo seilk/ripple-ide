@@ -9,6 +9,10 @@ change how it is used and measure the result.
 |---|---|---|
 | ![A suggestion writes the body of a function](docs/media/suggest.gif) | ![An inline edit of a selected function](docs/media/edit.gif) | ![The agent fixes a file and runs it](docs/media/agent.gif) |
 
+The status panel while Ripple writes a long answer:
+
+![The Ripple status panel goes from ready to busy and shows tokens per second](docs/media/status.gif)
+
 Recorded on a real Ripple-65B with `tools/record-demos.mjs`.
 
 ## Modes

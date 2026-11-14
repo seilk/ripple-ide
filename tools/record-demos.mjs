@@ -1,5 +1,5 @@
-// Records the three main features on a real Ripple and writes one GIF for each:
-// a suggestion while typing, an inline edit (Cmd+K), and the agent fixing and running a file.
+// Records the main features on a real Ripple and writes one GIF for each: a suggestion while
+// typing, an inline edit (Cmd+K), the agent fixing and running a file, and the Ripple status panel.
 //
 //   RIPPLE_RUNTIME_URL=http://127.0.0.1:8000/v1 RIPPLE_RUNTIME_MODEL=ripple \
 //   PLAYWRIGHT_CORE=... CHROMIUM=... node tools/record-demos.mjs [out dir] [scene ...]
@@ -26,6 +26,7 @@ const PANES = {
   suggest: { '--files-w': '176px', '--ripple-w': '264px', '--dock-h': '96px' },
   edit: { '--files-w': '176px', '--ripple-w': '264px', '--dock-h': '96px' },
   agent: { '--files-w': '176px', '--dock-h': '150px' },
+  status: { '--files-w': '176px', '--ripple-w': '420px', '--dock-h': '150px' },
 };
 const BUGGY = `def average(values):
     total = 0
@@ -69,7 +70,7 @@ async function record(page, frames) {
   return async () => { await cdp.send('Page.stopScreencast'); return shots; };
 }
 
-function toGif(shots, frames, target) {
+function toGif(shots, frames, target, crop) {
   // The time of each frame, with long waits cut short.
   const times = [0];
   for (let i = 1; i < shots.length; i += 1) times.push(times[i - 1] + Math.min(LONGEST_STILL_S, shots[i].at - shots[i - 1].at));
@@ -80,7 +81,10 @@ function toGif(shots, frames, target) {
     while (shown + 1 < shots.length && times[shown + 1] <= frame / GIF_FPS) shown += 1;
     symlinkSync(shots[shown].file, join(frames, `seq-${String(frame).padStart(5, '0')}.jpg`));
   }
-  const filter = `scale=${GIF_WIDTH}:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`;
+  // A scene can keep one part of the page: `crop` is in page pixels, the frames are larger by a fixed ratio.
+  const part = crop ? `crop=iw*${crop.width / VIEW.width}:ih*${crop.height / VIEW.height}:iw*${crop.x / VIEW.width}:ih*${crop.y / VIEW.height},` : '';
+  const width = crop ? Math.round(crop.width) * 2 : GIF_WIDTH; // a part is small, so it keeps every pixel of the frame
+  const filter = `${part}scale=${width}:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`;
   const made = spawnSync('ffmpeg', ['-v', 'error', '-y', '-framerate', String(GIF_FPS), '-i', join(frames, 'seq-%05d.jpg'), '-vf', filter, target], { stdio: 'inherit' });
   if (made.status !== 0) throw new Error(`ffmpeg failed for ${target}`);
   return total / GIF_FPS;
@@ -167,6 +171,27 @@ const SCENES = {
     await page.waitForTimeout(800);
     return stop;
   },
+  // 4. The status panel while Ripple writes a long answer: tokens per second, cache, draft model.
+  status: async (page, h, start) => {
+    await h.open('hello.py');
+    await page.locator('#ripple-status').click();
+    await page.waitForSelector('#ripple-panel:not([hidden])');
+    await page.waitForTimeout(1200);
+    const panel = await page.locator('#ripple-panel').boundingBox();
+    const chat = await page.locator('#ripple').boundingBox();
+    const left = Math.max(0, Math.floor(Math.min(panel.x, chat.x) - 16));
+    const stop = await start();
+    await page.waitForTimeout(1500);
+    await page.locator('#prompt').focus(); // a click outside the panel would close it
+    await page.keyboard.type('Explain this file part by part, in about 800 words.', { delay: 28 });
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('#send').textContent !== 'Send', null, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelector('#send').textContent === 'Send', null, { timeout: 120000 });
+    console.log('  panel:', (await page.locator('#ripple-panel').innerText()).replace(/\s+/g, ' ').slice(0, 260));
+    await page.waitForTimeout(2500);
+    stop.crop = { x: left, y: 0, width: VIEW.width - left, height: Math.ceil(panel.y + panel.height + 20) };
+    return stop;
+  },
 };
 
 try {
@@ -186,7 +211,7 @@ try {
     const shots = await stop();
     await context.close();
     const target = join(OUT, `${name}.gif`);
-    const seconds = toGif(shots, frames, target);
+    const seconds = toGif(shots, frames, target, stop.crop);
     rmSync(frames, { recursive: true, force: true });
     console.log(`  recorded ${(shots.at(-1).at - shots[0].at).toFixed(1)} s, GIF ${seconds.toFixed(1)} s -> ${target}`);
   }
