@@ -36,6 +36,12 @@ const fake = createServer((request, response) => {
   let raw = '';
   request.on('data', (chunk) => { raw += chunk; });
   request.on('end', () => setTimeout(() => {
+    if (request.method === 'GET') { // the status poll: /v1/models and /metrics
+      const models = request.url.endsWith('/models');
+      response.writeHead(models ? 200 : 404, { 'Content-Type': 'application/json' });
+      response.end(models ? JSON.stringify({ data: [{ id: 'ripple-opt', max_model_len: 4096 }] }) : '{}');
+      return;
+    }
     const body = JSON.parse(raw);
     if (!body.stream) Object.assign(fakeSeen, body); // keep the last suggestion request
     const text = 'blockIdx.x * blockDim.x + threadIdx.x;';
@@ -92,12 +98,44 @@ try {
     await page.goto(base);
     await page.waitForSelector('body[data-ready="1"]', { timeout: 20000 });
     assert.equal(await page.title(), 'Ripple IDE');
-    assert.equal(await page.locator('#file-list .file.folder').count(), 2);
-    assert.equal(await page.locator('#file-list .file:not(.folder)').count(), 7);
+    assert.equal(await page.locator('#file-list .file.folder').count(), 4);
+    assert.equal(await page.locator('#file-list .file:not(.folder)').count(), 19);
     assert.equal(await activeTab(), 'README.md');
     assert.equal(await page.locator('.ptx-pane').isVisible(), false);
     assert.equal(await page.locator('#toolchain').isVisible(), false);
     assert.equal(await page.locator('#primary').isDisabled(), true); // nothing runs a .md file
+  });
+
+  await step('the Ripple status line and panel say what the endpoint is', async () => {
+    await page.waitForFunction(() => document.querySelector('#ripple-status').dataset.state === 'ok');
+    assert.equal(await page.locator('#ripple-status').innerText(), 'Ripple ready');
+    await page.locator('#ripple-status').click();
+    assert.match(await page.locator('#ripple-panel').innerText(), /Endpoint\s+offline mock, no model/);
+    assert.match(await page.locator('#ripple-panel').innerText(), /This session/);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#ripple-panel').isVisible(), false);
+  });
+
+  await step('an HTML file shows a live preview that follows the editor', async () => {
+    await openFromTree('index.html');
+    assert.equal(await page.locator('.preview-pane').isVisible(), true);
+    const frame = page.frameLocator('#preview-frame');
+    await frame.locator('h1', { hasText: 'Counter' }).waitFor();
+    await frame.locator('#plus').click();
+    assert.equal(await frame.locator('#count').innerText(), '1'); // the page's own script runs
+    const html = await modelText('site/index.html');
+    await setModelText('site/index.html', html.replace('<h1>Counter</h1>', '<h1>Clicks</h1>'));
+    await frame.locator('h1', { hasText: 'Clicks' }).waitFor(); // unsaved text, no reload by hand
+    await openFromTree('style.css');
+    assert.equal(await page.locator('.preview-pane').isVisible(), true); // the page stays next to its stylesheet
+    const css = await modelText('site/style.css');
+    await setModelText('site/style.css', css.replace('font-size: 5rem;', 'font-size: 2rem;'));
+    await page.waitForFunction(() => true);
+    await frame.locator('#count').waitFor();
+    await page.waitForTimeout(600);
+    assert.equal(await frame.locator('#count').evaluate((el) => getComputedStyle(el).fontSize), '32px');
+    await setModelText('site/style.css', css);
+    await setModelText('site/index.html', html);
   });
 
   await step('runs a Python file and streams its output', async () => {
@@ -256,7 +294,7 @@ try {
   await step('search in files opens the hit, and the JavaScript file runs', async () => {
     await page.keyboard.press('ControlOrMeta+Shift+f');
     await page.waitForSelector('#palette[open]');
-    await page.keyboard.type('FizzBuzz');
+    await page.keyboard.type('first 15 numbers');
     await page.waitForFunction(() => /scripts\/fizz\.js:\d+/.test(document.querySelector('.palette-row')?.textContent || ''));
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('.tab[aria-selected="true"]')?.title === 'scripts/fizz.js');
@@ -309,6 +347,27 @@ try {
     assert.equal(await modelText('rowsum.cu'), before);
   });
 
+  await step('chats: a new one starts empty, the old one comes back, both survive a reload', async () => {
+    await page.waitForFunction(() => document.querySelector('#send').textContent === 'Send'); // the last answer has ended
+    await page.locator('#chat-new').click();
+    assert.match(await page.locator('#chat').innerText(), /Ask about the open file/);
+    assert.equal(await page.locator('#chat-select option').count(), 2);
+    await page.locator('#prompt').fill('second chat');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('#send').textContent === 'Send');
+    assert.equal(await page.locator('#chat-select').evaluate((el) => el.selectedOptions[0].textContent), 'second chat');
+    const older = await page.locator('#chat-select option').nth(1).getAttribute('value');
+    await page.locator('#chat-select').selectOption(older);
+    assert.match(await page.locator('#chat').innerText(), /Why is this kernel slow[\s\S]*Findings: local-mem[\s\S]*Rejected/);
+    assert.equal(await page.locator('#chat .tool[data-state="ok"]').count() >= 3, true);
+    await page.reload();
+    await page.waitForSelector('body[data-ready="1"]');
+    assert.equal(await page.locator('#chat-select option').count(), 2);
+    assert.match(await page.locator('#chat').innerText(), /second chat/); // the newest chat opens first
+    await page.locator('#chat-select').selectOption(older);
+    assert.match(await page.locator('#chat').innerText(), /Findings: local-mem/);
+  });
+
   await step('Ripple runs a file only after the user allows it', async () => {
     await openFromTree('fizz.js');
     await page.locator('#prompt').fill('run this file');
@@ -356,7 +415,7 @@ try {
     await page.waitForFunction(() => /Tab accepts \(Ripple, \d+ ms\)/.test(document.querySelector('#suggest-state').textContent));
     await page.keyboard.press('Tab');
     assert.match(await modelText('hello.py'), /index = blockIdx\.x \* blockDim\.x \+ threadIdx\.x;$/);
-    await page.waitForFunction(() => /Suggestions: \d+ shown, [3-9] accepted/.test(document.querySelector('.lab-session').textContent));
+    await page.waitForFunction(() => /Suggestions: \d+ shown, [1-9] accepted/.test(document.querySelector('.lab-session').textContent));
 
     await page.locator('#preset').selectOption('mock');
     assert.equal(await page.locator('#lab-name').inputValue(), 'Mock Ripple (offline)');

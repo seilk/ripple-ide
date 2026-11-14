@@ -733,3 +733,44 @@ def test_http_ripple_status_for_mock_and_for_a_dead_endpoint(ide):
 
     assert ok["ok"] is True
     assert dead["ok"] is False and "does not answer" in dead["detail"]
+
+
+# ---------------------------------------------------------------- status details and preview
+
+
+def test_metrics_page_is_reduced_to_a_few_numbers():
+    page = """# HELP vllm:num_requests_running Number of requests
+vllm:num_requests_running{engine="0",model_name="m"} 2.0
+vllm:num_requests_waiting{engine="0",model_name="m"} 1.0
+vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.125
+vllm:generation_tokens_total{engine="0",model_name="m"} 5000.0
+vllm:request_success_total{engine="0",finished_reason="stop",model_name="m"} 40.0
+vllm:request_success_total{engine="0",finished_reason="length",model_name="m"} 2.0
+vllm:spec_decode_num_drafts_total{engine="0",model_name="m"} 100.0
+vllm:spec_decode_num_accepted_tokens_total{engine="0",model_name="m"} 230.0
+vllm:time_to_first_token_seconds_bucket{le="0.1"} 7.0
+"""
+    assert ripple_api.parse_metrics(page) == {
+        "running": 2.0, "waiting": 1.0, "kv_cache_usage": 0.125, "generation_tokens": 5000.0,
+        "requests_done": 42.0, "spec_drafts": 100.0, "spec_accepted_tokens": 230.0}
+
+
+def test_http_preview_serves_the_draft_in_a_sandbox(ide):
+    _call(f"{ide}/api/file", "PUT", {"path": "site/index.html", "content": "<h1>saved</h1>"})
+    _call(f"{ide}/api/file", "PUT", {"path": "site/style.css", "content": "h1 { color: red; }"})
+
+    status, body, headers = _call(f"{ide}/preview/site/index.html")
+    assert status == 200 and body == "<h1>saved</h1>" and headers["Content-Type"].startswith("text/html")
+    assert headers["Content-Security-Policy"].startswith("sandbox allow-scripts") and "allow-same-origin" not in headers["Content-Security-Policy"]
+    assert headers.get("X-Frame-Options") is None
+    assert _call(f"{ide}/preview/site/style.css")[2]["Content-Type"].startswith("text/css")
+
+    _call(f"{ide}/api/preview-draft", "POST", {"path": "site/index.html", "content": "<h1>typing</h1>"})
+    assert _call(f"{ide}/preview/site/index.html")[1] == "<h1>typing</h1>"
+    _call(f"{ide}/api/preview-draft", "POST", {"path": "site/index.html", "content": None})
+    assert _call(f"{ide}/preview/site/index.html")[1] == "<h1>saved</h1>"
+
+    assert _call(f"{ide}/preview/../server.py")[0] == 404
+    assert _call(f"{ide}/api/preview-draft", "POST", {"path": "../x", "content": "y"})[0] == 400
+    assert _call(f"{ide}/api/files", headers={"Origin": "null"})[0] == 403  # a sandboxed page cannot call the API
+    assert _call(f"{ide}/")[2]["X-Frame-Options"] == "DENY"                  # the IDE itself still cannot be framed

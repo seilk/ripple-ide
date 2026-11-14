@@ -60,3 +60,13 @@ test('stripFence leaves code only, also while the answer is still streaming', as
   assert.equal(stripFence('```python\nx = '), 'x = ');
   assert.equal(stripFence('  a\n  b'), '  a\n  b');
 });
+
+test('remainder takes the typed characters off the front of a suggestion', async () => {
+  const { remainder } = await import('../web/src/complete.js');
+  assert.equal(remainder('    return ', 'sum(values) / len(values)', '    return su'), 'm(values) / len(values)');
+  assert.equal(remainder('x = ', 'total', 'x = '), 'total');
+  assert.equal(remainder('x = ', 'total', 'x = to'), 'tal');
+  assert.equal(remainder('x = ', 'total', 'x = total'), null); // nothing left to show
+  assert.equal(remainder('x = ', 'total', 'x = ma'), null);     // the typing went another way
+  assert.equal(remainder('x = ', 'total', 'y = '), null);       // the line changed before the cursor
+});

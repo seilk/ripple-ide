@@ -2,11 +2,14 @@
 // and a run or a compile report is the model's way to check its own work.
 
 import { streamChat } from './api.js';
-import { errorText, h } from './ui.js';
+import { errorText, h, prefs } from './ui.js';
 
 const MAX_TURNS = 12;
 const MAX_TOOL_RESULT_CHARS = 60_000;
 const CONTEXT_TOKENS = 1_048_576;
+const MAX_CHATS = 20;
+const MAX_STORED_CHARS = 1_500_000;
+const TITLE_CHARS = 36;
 
 export const TOOLS = [
   {
@@ -110,7 +113,8 @@ function formatTokens(n) {
 /**
  * @param {{
  *   els: {chat: HTMLElement, form: HTMLFormElement, prompt: HTMLTextAreaElement, send: HTMLButtonElement,
- *         quick: HTMLElement, ctx: HTMLElement, perf: HTMLElement},
+ *         quick: HTMLElement, ctx: HTMLElement, perf: HTMLElement,
+ *         chatSelect: HTMLSelectElement, chatNew: HTMLElement, chatDelete: HTMLElement},
  *   getRequest: () => {target: object, options: object},
  *   onPerf?: (perf: {ttft: number, tokps: number}) => void,
  *   systemPrompt: () => string,
@@ -118,10 +122,29 @@ function formatTokens(n) {
  * }} deps
  */
 export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
-  /** @type {Array<object>} */
-  const history = [];
+  /** @type {Array<{id: string, title: string, history: Array<any>}>} chats, newest first */
+  let chats = [];
+  try {
+    chats = JSON.parse(prefs.get('chats', '[]')).filter((chat) => chat && chat.id && Array.isArray(chat.history));
+  } catch { chats = []; }
+  const fresh = () => ({ id: `c${Date.now().toString(36)}`, title: 'New chat', history: [] });
+  if (!chats.length) chats = [fresh()];
+  let current = chats[0];
   /** @type {AbortController|null} */
   let running = null;
+
+  /** Keep the chats for the next visit. The oldest ones go first when they get too large. */
+  function persist() {
+    let kept = chats.slice(0, MAX_CHATS);
+    let text = JSON.stringify(kept);
+    while (text.length > MAX_STORED_CHARS && kept.length > 1) { kept = kept.slice(0, -1); text = JSON.stringify(kept); }
+    prefs.set('chats', text);
+  }
+
+  function renderChatList() {
+    els.chatSelect.replaceChildren(...chats.map((chat) => h('option', { value: chat.id }, chat.title)));
+    els.chatSelect.value = current.id;
+  }
 
   const scroll = () => { els.chat.scrollTop = els.chat.scrollHeight; };
   const append = (node) => { els.chat.querySelector('.chat-empty')?.remove(); els.chat.append(node); scroll(); return node; };
@@ -132,7 +155,68 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
       h('span', {}, 'Ripple reads, searches, runs and compiles with tools. Edits arrive as diffs for you to accept')));
   }
 
+  const toolState = (content) => {
+    try {
+      const result = JSON.parse(content);
+      if (result && typeof result === 'object' && result.rejected) return ['rejected', 'Rejected'];
+      if (result && typeof result === 'object' && result.error) return ['error', 'Failed'];
+    } catch { /* plain text result */ }
+    return ['ok', 'Done'];
+  };
+
+  /** Draw a stored chat again: the same blocks the live stream made. */
+  function renderChat() {
+    els.ctx.textContent = '';
+    if (!current.history.length) { showEmpty(); return; }
+    const results = new Map(current.history.filter((m) => m.role === 'tool').map((m) => [m.tool_call_id, m.content]));
+    const nodes = [];
+    let block = null;
+    for (const message of current.history) {
+      if (message.role === 'user') {
+        nodes.push(h('div', { class: 'msg msg-user' }, message.content));
+        block = h('div', { class: 'msg msg-ripple' });
+        nodes.push(block);
+      } else if (message.role === 'assistant' && block) {
+        if (message.reasoning_content) block.append(h('details', { class: 'think' }, h('summary', {}, 'Reasoning'), h('p', {}, message.reasoning_content)));
+        if (message.content) block.append(h('div', { class: 'say' }, message.content));
+        for (const call of message.tool_calls || []) {
+          const [state, label] = results.has(call.id) ? toolState(results.get(call.id)) : ['error', 'No result'];
+          block.append(h('div', { class: 'tool', 'data-state': state }, h('b', {}, call.function.name),
+            h('span', { class: 'arg' }, call.function.arguments.slice(0, 80)), h('span', { class: 'state' }, label)));
+        }
+      }
+    }
+    els.chat.replaceChildren(...nodes);
+    scroll();
+  }
+
+  function openChat(chat) {
+    if (running) return;
+    current = chat;
+    renderChatList();
+    renderChat();
+    els.prompt.focus();
+  }
+
+  function newChat() {
+    if (running) return;
+    if (!current.history.length) { openChat(current); return; } // the open chat is still empty
+    const chat = fresh();
+    chats = [chat, ...chats];
+    persist();
+    openChat(chat);
+  }
+
+  function deleteChat() {
+    if (running) return;
+    chats = chats.filter((chat) => chat !== current);
+    if (!chats.length) chats = [fresh()];
+    persist();
+    openChat(chats[0]);
+  }
+
   function setBusy(busy) {
+    els.chatSelect.disabled = busy;
     els.send.textContent = busy ? 'Stop' : 'Send';
     els.send.dataset.busy = busy ? '1' : '';
     els.prompt.disabled = busy;
@@ -179,7 +263,7 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
     let usage = null;
 
     const { target, options } = getRequest();
-    await streamChat({ ...target, options, messages: [{ role: 'system', content: systemPrompt() }, ...history], tools: TOOLS },
+    await streamChat({ ...target, options, messages: [{ role: 'system', content: systemPrompt() }, ...current.history], tools: TOOLS },
       (event) => {
         if (event.usage) usage = event.usage;
         const delta = event.choices?.[0]?.delta;
@@ -220,7 +304,14 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
 
   async function send(text) {
     if (running || !text.trim()) return;
+    const chat = current; // the answer belongs to the chat it was asked in
+    const history = chat.history;
     append(h('div', { class: 'msg msg-user' }, text));
+    if (!history.length) {
+      chat.title = text.trim().replace(/\s+/g, ' ').slice(0, TITLE_CHARS) || 'New chat';
+      chats = [chat, ...chats.filter((item) => item !== chat)];
+      renderChatList();
+    }
     history.push({ role: 'user', content: text });
     running = new AbortController();
     setBusy(true);
@@ -247,6 +338,7 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
       block.append(h('div', { class: 'msg-error' }, aborted ? 'Stopped' : errorText(error)));
     } finally {
       running = null;
+      persist();
       setBusy(false);
       scroll();
       els.prompt.focus();
@@ -270,10 +362,14 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
   const setQuick = (labels) => {
     els.quick.replaceChildren(...labels.map((label) => h('button', { type: 'button', onclick: () => send(label) }, label)));
   };
-  showEmpty();
+  els.chatSelect.addEventListener('change', () => openChat(chats.find((chat) => chat.id === els.chatSelect.value) || current));
+  els.chatNew.addEventListener('click', newChat);
+  els.chatDelete.addEventListener('click', deleteChat);
+  renderChatList();
+  renderChat();
 
   /** Put text in the prompt box without sending it. */
   const prefill = (text) => { els.prompt.value = text; els.prompt.focus(); els.prompt.setSelectionRange(text.length, text.length); };
 
-  return { send, prefill, setQuick, isRunning: () => running !== null };
+  return { send, prefill, setQuick, newChat, isRunning: () => running !== null };
 }

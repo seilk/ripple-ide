@@ -56,6 +56,14 @@ class Workspace:
         except UnicodeDecodeError:
             raise WorkspaceError(f"not a UTF-8 text file: {rel}") from None
 
+    def read_bytes(self, rel: str) -> bytes:
+        full = self.resolve(rel)
+        if not full.is_file():
+            raise WorkspaceError(f"no such file: {rel}")
+        if full.stat().st_size > MAX_FILE_BYTES * 8:
+            raise WorkspaceError(f"file is too large to preview: {rel}")
+        return full.read_bytes()
+
     def delete(self, rel: str) -> None:
         full = self.resolve(rel)
         if not full.is_file():

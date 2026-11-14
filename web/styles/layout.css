@@ -105,9 +105,28 @@ kbd {
 }
 
 .model { display: flex; align-items: center; gap: var(--space-3); flex: none; }
-.ripple-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-3); margin-right: calc(var(--space-2) * -1); }
-.ripple-dot[data-state="ok"] { background: var(--positive); }
-.ripple-dot[data-state="down"] { background: var(--negative); }
+.ripple-status {
+  display: flex; align-items: center; gap: var(--space-2); flex: none; height: var(--row-h); padding: 0 var(--space-2);
+  border: 0; border-radius: var(--radius-control); background: none; color: var(--text-2); font-size: var(--text-meta); white-space: nowrap;
+  transition: background-color var(--duration) var(--ease), color var(--duration) var(--ease);
+}
+.ripple-status:hover, .ripple-status[aria-expanded="true"] { background: var(--surface-raised); color: var(--text); }
+.ripple-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-3); }
+.ripple-status[data-state="ok"] .ripple-dot { background: var(--positive); }
+.ripple-status[data-state="busy"] .ripple-dot { background: var(--accent); }
+.ripple-status[data-state="down"] .ripple-dot { background: var(--negative); }
+.ripple-status[data-state="down"] { color: var(--negative); }
+
+.ripple-panel {
+  position: fixed; z-index: 20; top: calc(var(--topbar-h) + var(--space-1)); right: var(--space-3); width: min(480px, 92vw);
+  padding: var(--space-4); background: var(--surface-card); border: 1px solid var(--hairline-strong); border-radius: var(--radius-panel);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+.ripple-panel[hidden] { display: none; }
+.ripple-panel dl { display: grid; gap: var(--space-2); }
+.ripple-panel dl div { display: grid; grid-template-columns: 136px minmax(0, 1fr); gap: var(--space-3); }
+.ripple-panel dt { font-size: var(--text-meta); line-height: 20px; color: var(--text-3); }
+.ripple-panel dd { font: 400 var(--text-meta)/20px var(--font-code); color: var(--text); overflow-wrap: anywhere; }
 .perf { font: 400 var(--text-meta) var(--font-code); color: var(--text-3); white-space: nowrap; }
 .perf[data-live] { color: var(--text-2); }
 
@@ -188,9 +207,13 @@ body[data-resizing="y"] * { cursor: row-resize !important; }
 
 .split { position: relative; display: grid; grid-template-columns: minmax(160px, var(--src-w)) minmax(160px, 1fr); min-height: 0; }
 .split:not([data-second]) { grid-template-columns: minmax(0, 1fr); }
-.split:not([data-second]) .divider, .split:not([data-second="ptx"]) .ptx-pane, .split:not([data-second="lab"]) .lab-pane { display: none; }
+.split:not([data-second]) .divider, .split:not([data-second="ptx"]) .ptx-pane, .split:not([data-second="lab"]) .lab-pane,
+.split:not([data-second="preview"]) .preview-pane { display: none; }
 .pane { position: relative; display: grid; grid-template-rows: minmax(0, 1fr); min-width: 0; min-height: 0; }
-.ptx-pane, .lab-pane { grid-template-rows: var(--row-h) minmax(0, 1fr); border-left: 1px solid var(--hairline); }
+.ptx-pane, .lab-pane, .preview-pane { grid-template-rows: var(--row-h) minmax(0, 1fr); border-left: 1px solid var(--hairline); }
+.preview-pane iframe { width: 100%; height: 100%; border: 0; background: #ffffff; }
+body[data-resizing] .preview-pane iframe { pointer-events: none; } /* or the frame swallows the drag */
+.toggle.plain::before { display: none; }
 .lab-pane { background: var(--surface-deep); }
 .editor { min-width: 0; min-height: 0; }
 
@@ -247,6 +270,9 @@ body[data-resizing="y"] * { cursor: row-resize !important; }
 
 .ripple { display: grid; grid-template-rows: var(--row-h) minmax(0, 1fr) auto auto; background: var(--surface-deep); border-left: 1px solid var(--hairline); min-height: 0; }
 .ripple .pane-head span { margin-left: auto; }
+.chat-head { gap: var(--space-2); padding: 0 var(--space-2) 0 var(--space-3); }
+.chat-head select { flex: 1; min-width: 0; height: 20px; border: 0; background: none; color: var(--text); font: 500 var(--text-meta) var(--font-ui); text-overflow: ellipsis; }
+.chat-head .quiet { flex: none; }
 
 /* Inline edit bar, over the top of the source editor. */
 .edit-bar {

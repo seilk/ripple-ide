@@ -36,6 +36,7 @@ export const api = {
   search: (query) => request(`/api/search?q=${encodeURIComponent(query)}`),
   compile: (payload) => request('/api/compile', json('POST', payload)),
   rippleStatus: (target) => request('/api/ripple-status', json('POST', target)),
+  previewDraft: (path, content) => request('/api/preview-draft', json('POST', { path, content })),
 };
 
 /** Stream one chat completion. */

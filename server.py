@@ -16,11 +16,12 @@ import argparse
 import http.client
 import json
 import logging
+import mimetypes
 import os
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ide import complete, edit, ripple_api, runner
 from ide.toolchain import CompileRequest, Toolchain, ToolchainError, validate_flags
@@ -37,6 +38,12 @@ CSP = (
     "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
 )
 
+# A previewed page is the user's own HTML. It runs in a sandbox with no origin of its
+# own, so its scripts cannot call the IDE's API or read the IDE page.
+PREVIEW_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-popups; "
+               "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; frame-ancestors 'self'")
+MAX_DRAFTS = 40
+
 log = logging.getLogger("ripple.server")
 
 
@@ -49,6 +56,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
     run_enabled = True
     custom_endpoints = True
     endpoint_hosts: frozenset[str] = frozenset()
+    drafts: dict[str, str] = {}  # unsaved editor text for the preview, by workspace path
+    _preview = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -58,9 +67,10 @@ class IdeHandler(SimpleHTTPRequestHandler):
             log.info("%s %s", self.address_string(), fmt % args)
 
     def end_headers(self) -> None:
-        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Content-Security-Policy", PREVIEW_CSP if self._preview else CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        if not self._preview:
+            self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         if "/vendor/" not in self.path:
             self.send_header("Cache-Control", "no-store")
@@ -103,6 +113,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
     # ---------------------------------------------------------- routing
     def do_GET(self) -> None:
         url = urlparse(self.path)
+        if url.path.startswith("/preview/"):
+            return self._serve_preview(unquote(url.path[len("/preview/"):]))
         if not url.path.startswith("/api/"):
             return super().do_GET()
         if not self._is_local():
@@ -158,7 +170,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlparse(self.path).path
-        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/edit", "/api/run", "/api/ripple-status"):
+        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/edit", "/api/run", "/api/ripple-status",
+                         "/api/preview-draft"):
             return self._json(404, {"error": "not found"})
         if not self._is_local():
             return self._json(403, {"error": "local requests only"})
@@ -173,9 +186,14 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return self._run(body)
         if route == "/api/ripple-status":
             try:
-                return self._json(200, ripple_api.check(self._target(body)[0]))
+                status = ripple_api.check(self._target(body)[0])
             except ripple_api.UpstreamError as exc:
                 return self._json(200, {"ok": False, "detail": exc.payload["error"]})
+            status["gpus"] = self.toolchain.gpu_status() if body.get("gpus") else []
+            status["runner"] = self.toolchain.runner
+            return self._json(200, status)
+        if route == "/api/preview-draft":
+            return self._preview_draft(body)
         if route == "/api/edit":
             try:
                 return self._edit(body)
@@ -231,6 +249,44 @@ class IdeHandler(SimpleHTTPRequestHandler):
     def _chain(first: dict, rest):
         yield first
         yield from rest
+
+    def _preview_draft(self, body: dict) -> None:
+        """Keep the unsaved text of a file, so the preview shows what is in the editor."""
+        try:
+            path = str(body.get("path", ""))
+            self.workspace.resolve(path)
+        except WorkspaceError as exc:
+            return self._json(400, {"error": str(exc)})
+        content = body.get("content")
+        if content is None:
+            self.drafts.pop(path, None)
+        elif isinstance(content, str) and len(content) <= 2_000_000:
+            self.drafts.pop(path, None)
+            self.drafts[path] = content
+            while len(self.drafts) > MAX_DRAFTS:
+                self.drafts.pop(next(iter(self.drafts)))
+        else:
+            return self._json(400, {"error": "content must be text of at most 2 MB"})
+        return self._json(200, {"path": path})
+
+    def _serve_preview(self, path: str) -> None:
+        if not self._is_local():
+            return self._json(403, {"error": "local requests only"})
+        try:
+            data = self.drafts[path].encode() if path in self.drafts else self.workspace.read_bytes(path)
+        except WorkspaceError as exc:
+            return self._json(404, {"error": str(exc)})
+        self._preview = True
+        try:
+            self.send_response(200)
+            kind = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            self.send_header("Content-Type", f"{kind}; charset=utf-8" if kind.startswith("text/") or kind.endswith(("javascript", "json")) else kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        finally:
+            self._preview = False
+        return None
 
     def _target(self, body: dict) -> tuple[dict, dict]:
         """(endpoint, request overrides) for a chat or completion request."""

@@ -16,6 +16,7 @@ import { createPalette } from './palette.js';
 import { analyzePtx, basename } from './ptx-analyze.js';
 import { renderReport } from './report.js';
 import { setupDividers } from './resize.js';
+import { createRippleStatus } from './status.js';
 import { createRippleTools, systemPrompt } from './ripple-tools.js';
 import { createTree } from './tree.js';
 import { $, debounce, errorText, extOf, h, kernelKind, prefs } from './ui.js';
@@ -24,7 +25,9 @@ const LIVE_ANALYSIS_MS = 250;
 const LIVE_COMPILE_MS = 600;
 const MAX_FINDINGS_FOR_SUGGESTIONS = 8;
 const MAX_OUTPUT_CHARS = 200_000;
-const RIPPLE_STATUS_MS = 10_000;
+const PREVIEW_DELAY_MS = 300;
+const PREVIEW_PAGE = ['html', 'htm'];
+const PREVIEW_PART = ['css', 'js', 'mjs', 'svg', 'json'];
 const COMPILE_LABEL = { cuda: 'Compile to PTX', ptx: 'Check PTX', triton: 'Run for PTX' };
 const PREF_KEY = { live: 'live', suggest: 'suggest', showDebugLines: 'debug-lines' };
 const MODES = { general: 'General', kernel: 'Kernel', lab: 'Ripple lab' };
@@ -45,6 +48,8 @@ const state = {
   run: { enabled: false, /** @type {string[]} */ extensions: [] },
   /** @type {AbortController|null} */ running: null,
   /** @type {'general'|'kernel'|'lab'} */ mode: 'general',
+  /** @type {string|null} the page shown in the preview pane */ previewPath: null,
+  previewVersion: 0,
   live: prefs.get('live', 'on') === 'on',
   suggest: prefs.get('suggest', 'on') === 'on',
   showDebugLines: prefs.get('debug-lines', 'off') === 'on',
@@ -68,7 +73,7 @@ const els = {
   confirmDialog: /** @type {HTMLDialogElement} */ ($('confirm-dialog')),
 };
 
-let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette; let lab; let inlineEdit;
+let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette; let lab; let inlineEdit; let rippleStatus;
 
 function setStatus(text, kind = '') {
   els.status.textContent = text;
@@ -135,6 +140,7 @@ async function ensureOpen(path) {
   const entry = { model, savedVersion: model.getAlternativeVersionId() };
   model.onDidChangeContent(() => {
     renderTabs();
+    if (path === state.active && previewFor(path)) refreshPreview();
     const kind = kindOf(path);
     if (kind === 'ptx' && path === state.active) livePtx();
     if (kind === 'cuda') liveCompile(path);
@@ -346,6 +352,37 @@ function jump({ ptxLine, srcLine, focusSource = false }) {
   }
 }
 
+/**
+ * The page to preview while `path` is open: the file itself when it is HTML, or the
+ * page already in the preview when `path` is a stylesheet or script next to it.
+ */
+function previewFor(path) {
+  const ext = extOf(path);
+  if (PREVIEW_PAGE.includes(ext)) return path;
+  const folder = (file) => file.split('/').slice(0, -1).join('/');
+  if (state.previewPath && PREVIEW_PART.includes(ext) && folder(path).startsWith(folder(state.previewPath))) return state.previewPath;
+  return null;
+}
+
+function showPreview() {
+  state.previewVersion += 1;
+  $('preview-path').textContent = state.previewPath;
+  /** @type {HTMLIFrameElement} */ ($('preview-frame')).src = `/preview/${state.previewPath.split('/').map(encodeURIComponent).join('/')}?v=${state.previewVersion}`;
+}
+
+/** Send the unsaved text of the active file, then load the page again. */
+const refreshPreview = debounce(async () => {
+  const path = state.active;
+  const entry = path && state.open.get(path);
+  if (!entry || !state.previewPath) return;
+  try {
+    await api.previewDraft(path, isDirty(path) ? entry.model.getValue() : null);
+    showPreview();
+  } catch (error) {
+    setStatus(errorText(error), 'error');
+  }
+}, PREVIEW_DELAY_MS);
+
 /** Fold the line-info lines away, so the listing shows instructions. Line numbers stay true. */
 function applyDebugLineFilter() {
   if (typeof ptxEditor.setHiddenAreas !== 'function') return;
@@ -374,7 +411,9 @@ function showResult() {
   const kind = path ? kindOf(path) : null;
   const stored = path ? state.results.get(path) : null;
   const res = stored?.res ?? null;
-  const second = state.mode === 'lab' ? 'lab' : kind === 'cuda' || kind === 'triton' ? 'ptx' : null;
+  const page = path ? previewFor(path) : null;
+  if (page && page !== state.previewPath) { state.previewPath = page; showPreview(); }
+  const second = state.mode === 'lab' ? 'lab' : kind === 'cuda' || kind === 'triton' ? 'ptx' : page ? 'preview' : null;
   if (second) els.split.dataset.second = second; else delete els.split.dataset.second;
   const report = (analysis) => renderReport(els.report, {
     analysis, res, sourceName: path || '', onJump: jump, stale: stored?.stale ?? false,
@@ -496,22 +535,6 @@ async function loadLab() {
     pane: $('lab-pane'), benchPanel: els.bench, select: els.preset, presets, defaultPreset: fallback,
     customEndpoints, onStatus: setStatus,
   });
-}
-
-/** The dot next to the profile list: does the endpoint of the active profile answer? */
-async function checkRipple() {
-  const dot = $('ripple-dot');
-  try {
-    const status = await api.rippleStatus(lab.target());
-    const changed = dot.dataset.state !== (status.ok ? 'ok' : 'down');
-    dot.dataset.state = status.ok ? 'ok' : 'down';
-    dot.title = status.ok ? `Ripple answers: ${status.detail}` : `Ripple does not answer: ${status.detail}`;
-    if (changed && !status.ok) setStatus(`Ripple does not answer: ${status.detail}`, 'error');
-    if (changed && status.ok && els.status.dataset.kind === 'error' && /Ripple does not answer/.test(els.status.textContent)) setStatus('Ripple answers again', 'ok');
-  } catch (error) {
-    dot.dataset.state = 'down';
-    dot.title = errorText(error);
-  }
 }
 
 /** @param {HTMLElement} button @param {'live'|'suggest'|'showDebugLines'} key @param {() => void} onChange */
@@ -709,6 +732,7 @@ function setupRipple() {
       chat: $('chat'), form: /** @type {HTMLFormElement} */ ($('composer')),
       prompt: /** @type {HTMLTextAreaElement} */ ($('prompt')), send: /** @type {HTMLButtonElement} */ ($('send')),
       quick: $('quick'), ctx: $('ctx'), perf: $('perf'),
+      chatSelect: /** @type {HTMLSelectElement} */ ($('chat-select')), chatNew: $('chat-new'), chatDelete: $('chat-delete'),
     },
     getRequest: () => ({ target: lab.target(), options: lab.chatOptions() }),
     onPerf: (perf) => lab.noteChat(perf),
@@ -762,6 +786,8 @@ function commands() {
     { label: 'Run or compile the active file', hint: '⌘↵', run: doPrimary },
     { label: 'Ripple: Edit the selection', hint: '⌘K', run: () => inlineEdit.open() },
     { label: 'Ripple: Ask about selection', hint: '⌘L', run: askAboutSelection },
+    { label: 'Ripple: New chat', run: () => agent.newChat() },
+    { label: 'Ripple: Show server status', run: () => $('ripple-status').click() },
     { label: `Inline suggestions: turn ${state.suggest ? 'off' : 'on'}`, run: toggle(els.toggleSuggest) },
     { label: 'Lab: Run benchmark', detail: 'speed and accuracy of the active profile', run: () => { setMode('lab'); lab.runBenchmark(); } },
     { label: `Kernel: Live compile: turn ${state.live ? 'off' : 'on'}`, run: toggle(els.toggleLive) },
@@ -788,9 +814,15 @@ async function boot() {
   await Promise.all([refreshFiles(), refreshToolchain()]);
   const mode = prefs.get('mode', 'general');
   setMode(mode in MODES ? mode : 'general');
-  checkRipple();
-  setInterval(checkRipple, RIPPLE_STATUS_MS);
-  els.preset.addEventListener('change', checkRipple);
+  rippleStatus = createRippleStatus({
+    button: $('ripple-status'), panel: $('ripple-panel'), getTarget: () => lab.target(), getSession: () => lab.sessionLine(),
+    onChange: (ok, detail, first) => {
+      if (!ok) setStatus(`Ripple does not answer: ${detail}`, 'error');
+      else if (!first) setStatus('Ripple answers again', 'ok');
+    },
+  });
+  els.preset.addEventListener('change', () => rippleStatus.refresh());
+  $('preview-reload').addEventListener('click', () => { if (state.previewPath) showPreview(); });
   updatePrimary();
   const remembered = prefs.get('active', '');
   const first = state.files.find((f) => f.path === remembered) || state.files.find((f) => /readme/i.test(f.path)) || state.files[0];

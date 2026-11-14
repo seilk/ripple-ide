@@ -9,7 +9,7 @@ const MAX_SAMPLES = 200;
 
 /** Settings of one profile. An empty chat value means "leave it to the server". */
 const FIELDS = [
-  { section: 'Inline suggestions', key: 'debounce', label: 'Pause before asking', unit: 'ms', min: 0, max: 2000, step: 5, value: 75 },
+  { section: 'Inline suggestions', key: 'debounce', label: 'Pause before asking', unit: 'ms', min: 0, max: 2000, step: 5, value: 0 },
   { key: 'prefix', label: 'Context before the cursor', unit: 'chars', min: 200, max: 40000, step: 100, value: 6000 },
   { key: 'suffix', label: 'Context after the cursor', unit: 'chars', min: 0, max: 16000, step: 100, value: 1500 },
   { key: 'tokens', label: 'Max tokens', min: 1, max: 1024, step: 1, value: 192 },
@@ -104,6 +104,7 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
     noteAccepted() { session.accepted += 1; renderSession(); },
     noteChat({ ttft, tokps }) { push(session.ttft, ttft); push(session.tokps, tokps); renderSession(); },
     runBenchmark: () => bench(),
+    sessionLine: () => sessionLine.textContent,
     isBenching: () => benching !== null,
   };
 

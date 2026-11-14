@@ -43,10 +43,14 @@
 
     <div class="model">
       <span id="perf" class="perf" title="Time to first token and output speed of the last Ripple answer"></span>
-      <span id="ripple-dot" class="ripple-dot" role="status" title="Checking the Ripple endpoint"></span>
+      <button id="ripple-status" class="ripple-status" type="button" aria-expanded="false" aria-controls="ripple-panel">
+        <span class="ripple-dot"></span><span>Checking Ripple</span>
+      </button>
       <select id="preset" aria-label="Ripple profile" title="The Ripple profile the IDE uses. Edit profiles in Ripple lab mode"></select>
     </div>
   </header>
+
+  <div id="ripple-panel" class="ripple-panel" hidden></div>
 
   <main class="bench">
     <div id="divide-files" class="divider divider-x" role="separator" aria-orientation="vertical" aria-label="Resize file list" tabindex="0"></div>
@@ -86,6 +90,12 @@
         </div>
         <div id="divide-split" class="divider divider-x" role="separator" aria-orientation="vertical" aria-label="Resize source and PTX" tabindex="0"></div>
         <div id="lab-pane" class="pane lab-pane" aria-label="Ripple lab"></div>
+        <div id="preview-pane" class="pane preview-pane">
+          <header class="pane-head"><b>Preview</b><span id="preview-path"></span>
+            <button id="preview-reload" class="toggle plain" type="button" title="Load the page again">Reload</button>
+          </header>
+          <iframe id="preview-frame" title="Page preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+        </div>
         <div class="pane ptx-pane">
           <header class="pane-head"><b>PTX</b><span id="ptx-meta"></span>
             <button id="toggle-debug" class="toggle" type="button" aria-pressed="false" title="Show .loc lines and debug labels">Line info</button>
@@ -110,7 +120,12 @@
     </section>
 
     <aside id="ripple" class="ripple" aria-label="Ripple">
-      <header class="pane-head"><b>Ripple</b><span id="ctx" title="Prompt tokens of the last request, of the context size"></span></header>
+      <header class="pane-head chat-head">
+        <select id="chat-select" aria-label="Conversation"></select>
+        <span id="ctx" title="Prompt tokens of the last request, of the context size"></span>
+        <button id="chat-new" class="quiet" type="button" title="Start a new conversation">New chat</button>
+        <button id="chat-delete" class="quiet" type="button" title="Delete this conversation">Delete</button>
+      </header>
       <div id="chat" class="chat" aria-live="polite"></div>
       <div id="quick" class="quick"></div>
       <form id="composer" class="composer">

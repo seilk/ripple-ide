@@ -30,6 +30,7 @@ MAX_SOURCE_BYTES = 2 * 1024 * 1024
 COMPILE_TIMEOUT_S = 180
 PROBE_TIMEOUT_S = 30
 PROBE_TTL_S = 120
+GPU_STATUS_TTL_S = 4
 DEFAULT_ARCH = "sm_100"
 
 ARCH_RE = re.compile(r"^sm_(\d{2,3})[a-z]?$")
@@ -354,6 +355,25 @@ class Toolchain:
             probed_at=time.time(),
         )
         return self._info
+
+    def gpu_status(self) -> list[dict]:
+        """GPUs of the runner, from nvidia-smi. Empty when there is none. Cached for a few seconds."""
+        cached = getattr(self, "_gpu_cache", None)
+        if cached and time.time() - cached[0] < GPU_STATUS_TTL_S:
+            return cached[1]
+        gpus: list[dict] = []
+        try:
+            done = self._run("nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,power.draw,temperature.gpu "
+                             "--format=csv,noheader,nounits 2>/dev/null", PROBE_TIMEOUT_S)
+            for line in done.stdout.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) == 6 and parts[1].replace(".", "").isdigit():
+                    gpus.append({"name": parts[0], "memory_used_mib": float(parts[1]), "memory_total_mib": float(parts[2]),
+                                 "utilization": float(parts[3]), "power_w": float(parts[4]), "temperature_c": float(parts[5])})
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        self._gpu_cache = (time.time(), gpus)
+        return gpus
 
     def compile(self, req: CompileRequest) -> dict:
         kind = validate_request(req)

@@ -228,16 +228,60 @@ def content_events(text: str, pieces: int = 12) -> Iterator[bytes]:
     yield _sse("[DONE]")
 
 
+_METRIC_LINE = re.compile(r"^(vllm:[\w:]+)(?:\{[^}]*\})?\s+([-+0-9.eE]+)$")
+_METRICS_WANTED = {
+    "vllm:num_requests_running": "running",
+    "vllm:num_requests_waiting": "waiting",
+    "vllm:kv_cache_usage_perc": "kv_cache_usage",
+    "vllm:gpu_cache_usage_perc": "kv_cache_usage",
+    "vllm:generation_tokens_total": "generation_tokens",
+    "vllm:prompt_tokens_total": "prompt_tokens",
+    "vllm:prompt_tokens_cached_total": "prompt_tokens_cached",
+    "vllm:prefix_cache_queries_total": "prefix_cache_queries",
+    "vllm:prefix_cache_hits_total": "prefix_cache_hits",
+    "vllm:request_success_total": "requests_done",
+    "vllm:spec_decode_num_drafts_total": "spec_drafts",
+    "vllm:spec_decode_num_draft_tokens_total": "spec_draft_tokens",
+    "vllm:spec_decode_num_accepted_tokens_total": "spec_accepted_tokens",
+}
+
+
+def parse_metrics(text: str) -> dict:
+    """The few numbers of a vLLM /metrics page that say how the server is doing, summed over labels."""
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        match = _METRIC_LINE.match(line)
+        if match and match.group(1) in _METRICS_WANTED:
+            key = _METRICS_WANTED[match.group(1)]
+            out[key] = out.get(key, 0.0) + float(match.group(2))
+    return out
+
+
+def _get(url: str, headers: dict) -> bytes:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=STATUS_TIMEOUT_S) as response:  # noqa: S310
+        return response.read(2_000_000)
+
+
 def check(preset: dict) -> dict:
-    """Does the endpoint answer right now? Used for the status dot next to the profile list."""
+    """Does the endpoint answer right now, and how busy is it? For the status dot and the status panel."""
     if preset["base_url"] == "mock://":
-        return {"ok": True, "detail": "offline mock, no model"}
+        return {"ok": True, "detail": "offline mock, no model", "model": "mock", "metrics": {}}
     headers = {"Authorization": f"Bearer {preset_key(preset)}"} if preset_key(preset) else {}
-    request = urllib.request.Request(preset["base_url"].rstrip("/") + "/models", headers=headers)
+    base = preset["base_url"].rstrip("/")
     try:
-        with urllib.request.urlopen(request, timeout=STATUS_TIMEOUT_S) as response:  # noqa: S310 - fixed or validated URL
-            response.read(1)
-        return {"ok": True, "detail": f"{preset['model']} at {preset['base_url']}"}
+        models = json.loads(_get(base + "/models", headers))
+        served = next((m for m in models.get("data", []) if m.get("id") == preset["model"]), None) or {}
+        status = {"ok": True, "detail": f"{preset['model']} at {preset['base_url']}", "model": preset["model"],
+                  "served_as": served.get("root") or served.get("id"), "max_model_len": served.get("max_model_len"),
+                  "metrics": {}}
+        try:  # vLLM and SGLang serve Prometheus text next to /v1
+            status["metrics"] = parse_metrics(_get(base.removesuffix("/v1") + "/metrics", headers).decode(errors="replace"))
+            status["at"] = time.time()
+        except (OSError, http.client.HTTPException, ValueError):
+            pass
+        return status
+    except json.JSONDecodeError:
+        return {"ok": True, "detail": f"{preset['model']} at {preset['base_url']}", "model": preset["model"], "metrics": {}}
     except urllib.error.HTTPError as exc:
         return {"ok": False, "detail": f"{preset['base_url']} answered {exc.code}"}
     except (OSError, http.client.HTTPException) as exc:
