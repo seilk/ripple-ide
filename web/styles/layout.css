@@ -123,10 +123,41 @@ kbd {
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
 }
 .ripple-panel[hidden] { display: none; }
+.ripple-panel { animation: panel-in 180ms var(--ease); display: grid; gap: var(--space-4); }
+@keyframes panel-in { from { opacity: 0; transform: translateY(-6px); } }
+
+/* The mark: three rings. They leave the centre only while the server makes tokens. */
+.status-head { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: var(--space-3); align-items: center; }
+.status-line { display: block; font-weight: 500; font-size: var(--text-title); line-height: 24px; }
+.status-endpoint { display: block; font: 400 var(--text-meta)/16px var(--font-code); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ripple-mark { position: relative; width: 40px; height: 40px; }
+.ripple-mark i { position: absolute; inset: 0; border: 1.5px solid var(--text-2); border-radius: 50%; }
+.ripple-mark i:nth-child(1) { inset: 16px; background: var(--text); border-color: var(--text); }
+.ripple-mark i:nth-child(2) { inset: 8px; opacity: 0.6; }
+.ripple-mark i:nth-child(3) { opacity: 0.25; }
+.ripple-mark[data-state="ok"] i:nth-child(1) { background: var(--positive); border-color: var(--positive); }
+.ripple-mark[data-state="down"] i:nth-child(1) { background: var(--negative); border-color: var(--negative); }
+.ripple-mark[data-busy] i:nth-child(1) { background: var(--accent); border-color: var(--accent); }
+.ripple-mark[data-busy] i:nth-child(2), .ripple-mark[data-busy] i:nth-child(3) { inset: 0; border-color: var(--accent); animation: ring-out 1.6s var(--ease) infinite; }
+.ripple-mark[data-busy] i:nth-child(3) { animation-delay: 0.8s; }
+@keyframes ring-out { from { transform: scale(0.25); opacity: 0.9; } to { transform: scale(1); opacity: 0; } }
+
+/* Tokens per second, one bar per second. Bars grow from the bottom line. */
+.status-spark { display: grid; gap: var(--space-1); }
+.spark { display: flex; align-items: flex-end; gap: 2px; height: 48px; border-bottom: 1px solid var(--hairline-strong); }
+.spark i { flex: 1; height: 100%; background: var(--text-3); transform-origin: bottom; transform: scaleY(0.03); transition: transform 300ms var(--ease), background-color 300ms var(--ease); }
+.spark i[data-on] { background: var(--accent); }
+.status-spark-label { display: flex; justify-content: space-between; font-size: var(--text-meta); line-height: 16px; color: var(--text-3); }
+.status-spark-label .status-value { font-family: var(--font-code); color: var(--text); }
+
 .ripple-panel dl { display: grid; gap: var(--space-2); }
-.ripple-panel dl div { display: grid; grid-template-columns: 136px minmax(0, 1fr); gap: var(--space-3); }
+.status-row { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: var(--space-3); min-height: 28px; }
 .ripple-panel dt { font-size: var(--text-meta); line-height: 20px; color: var(--text-3); }
-.ripple-panel dd { font: 400 var(--text-meta)/20px var(--font-code); color: var(--text); overflow-wrap: anywhere; }
+.ripple-panel dd { display: grid; gap: var(--space-1); align-content: start; min-width: 0; }
+.status-value { font: 400 var(--text-meta)/20px var(--font-code); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter { display: block; height: 3px; background: var(--surface-raised); border-radius: 2px; overflow: hidden; }
+.meter[hidden] { display: block; visibility: hidden; } /* keeps the row height when there is no number */
+.meter i { display: block; height: 100%; background: var(--text-2); transform-origin: left; transform: scaleX(0); transition: transform 400ms var(--ease); }
 .perf { font: 400 var(--text-meta) var(--font-code); color: var(--text-3); white-space: nowrap; }
 .perf[data-live] { color: var(--text-2); }
 
@@ -306,5 +337,5 @@ body[data-resizing] .preview-pane iframe { pointer-events: none; } /* or the fra
   .brand-name, .toolchain, .field, .search-box { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  * { transition: none !important; animation: none !important; }
 }

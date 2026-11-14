@@ -70,3 +70,29 @@ test('remainder takes the typed characters off the front of a suggestion', async
   assert.equal(remainder('x = ', 'total', 'x = ma'), null);     // the typing went another way
   assert.equal(remainder('x = ', 'total', 'y = '), null);       // the line changed before the cursor
 });
+
+test('status view: busy from token flow, shares as fills, dashes when the server gives no numbers', async () => {
+  const { statusLine, statusView } = await import('../web/src/status.js');
+  const before = { ok: true, at: 100, metrics: { generation_tokens: 1000 } };
+  const now = {
+    ok: true, at: 102, detail: 'ripple at http://127.0.0.1:8000/v1',
+    metrics: { running: 0, waiting: 0, generation_tokens: 1500, requests_done: 12, prompt_tokens: 1000, prompt_tokens_cached: 770,
+      kv_cache_usage: 0.02, spec_drafts: 100, spec_draft_tokens: 700, spec_accepted_tokens: 248 },
+    gpus: [{ name: 'NVIDIA B200', memory_used_mib: 171628, memory_total_mib: 183359, utilization: 35, power_w: 244 }],
+  };
+  const view = statusView(now, before);
+
+  assert.equal(view.tokps, 250);
+  assert.equal(view.busy, true); // tokens flowed since the last poll, though no request runs at this instant
+  assert.equal(view.rows.throughput.text, '250 tok/s');
+  assert.deepEqual(view.rows.cache, { text: '77 % of prompt tokens reused', fill: 0.77 });
+  assert.equal(view.rows.draft.text, '3.48 tokens per step, 35 % kept');
+  assert.equal(view.rows.memory.text, '168 of 179 GB');
+  assert.ok(Math.abs(view.rows.memory.fill - 0.936) < 0.001);
+  assert.equal(statusLine(now), 'Ripple ready');
+
+  const mock = statusView({ ok: true, detail: 'offline mock, no model', metrics: {}, gpus: [] }, null);
+  assert.equal(mock.busy, false);
+  assert.deepEqual([mock.rows.memory.text, mock.rows.cache.text, mock.rows.throughput.text], ['\u2013', '\u2013', '\u2013']);
+  assert.equal(statusView({ ok: false, detail: 'no route' }, null).rows.endpoint.text, 'no route');
+});

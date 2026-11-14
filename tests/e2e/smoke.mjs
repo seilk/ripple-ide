@@ -110,8 +110,19 @@ try {
     await page.waitForFunction(() => document.querySelector('#ripple-status').dataset.state === 'ok');
     assert.equal(await page.locator('#ripple-status').innerText(), 'Ripple ready');
     await page.locator('#ripple-status').click();
-    assert.match(await page.locator('#ripple-panel').innerText(), /Endpoint\s+offline mock, no model/);
+    assert.match(await page.locator('#ripple-panel').innerText(), /Ripple ready\s+offline mock, no model/);
     assert.match(await page.locator('#ripple-panel').innerText(), /This session/);
+    assert.equal(await page.locator('#ripple-panel .spark i').count(), 40);
+    assert.equal(await page.locator('#ripple-panel .ripple-mark[data-busy]').count(), 0); // nothing moves while idle
+    // The panel keeps its size while it follows the server.
+    const sizes = await page.evaluate(() => new Promise((resolve) => {
+      const seen = new Set();
+      const panel = document.querySelector('#ripple-panel');
+      const observer = new ResizeObserver(() => seen.add(`${panel.offsetWidth}x${panel.offsetHeight}`));
+      observer.observe(panel);
+      setTimeout(() => { observer.disconnect(); resolve([...seen]); }, 2600);
+    }));
+    assert.equal(sizes.length, 1, `panel changed size: ${sizes}`);
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#ripple-panel').isVisible(), false);
   });

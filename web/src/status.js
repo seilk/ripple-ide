@@ -1,43 +1,21 @@
 // Ripple status: is the endpoint of the active profile answering, and how busy
 // is the server behind it. A short line in the top bar, details in a panel.
+//
+// The panel moves only when the server does: rings leave the mark while tokens
+// are generated, a bar graph shows tokens per second, and meters slide to new
+// values. The rows are built once and keep their size, so nothing jumps.
 
 import { api } from './api.js';
 import { errorText, h } from './ui.js';
 
-const POLL_MS = 5000;
+const POLL_CLOSED_MS = 5000;
+const POLL_OPEN_MS = 1000;
+const SPARK_BARS = 40;
+const SPARK_FLOOR = 50; // tok/s that fills the graph when the server is slower than this
 
 const gb = (mib) => (mib / 1024).toFixed(0);
-const percent = (part, whole) => (whole > 0 ? `${Math.round((part / whole) * 100)} %` : null);
 const count = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n)));
-
-/**
- * Rows of the panel from one status answer. `before` is the answer of the poll before it.
- * @returns {Array<[string, string]>}
- */
-export function statusRows(status, before) {
-  const rows = [];
-  const m = status.metrics || {};
-  rows.push(['Endpoint', status.detail || '']);
-  if (status.served_as && status.served_as !== status.model) rows.push(['Model', status.served_as]);
-  if (status.max_model_len) rows.push(['Context', `${count(status.max_model_len)} tokens`]);
-  if (m.running !== undefined) rows.push(['Requests', `${m.running} running, ${m.waiting ?? 0} waiting`]);
-  const made = before?.metrics?.generation_tokens !== undefined && m.generation_tokens !== undefined
-    ? m.generation_tokens - before.metrics.generation_tokens : 0;
-  const seconds = before?.at && status.at ? status.at - before.at : 0;
-  if (m.generation_tokens !== undefined) {
-    rows.push(['Generated', `${count(m.generation_tokens)} tokens in ${count(m.requests_done ?? 0)} requests${made > 0 && seconds > 0 ? `, ${Math.round(made / seconds)} tok/s now` : ''}`]);
-  }
-  const cached = percent(m.prompt_tokens_cached ?? m.prefix_cache_hits ?? 0, m.prompt_tokens ?? m.prefix_cache_queries ?? 0);
-  if (cached) rows.push(['Prompt cache', `${cached} of prompt tokens reused`]);
-  if (m.kv_cache_usage !== undefined) rows.push(['KV cache', `${(m.kv_cache_usage * 100).toFixed(1)} % in use`]);
-  if (m.spec_drafts > 0) {
-    rows.push(['Speculative decoding', `${(1 + m.spec_accepted_tokens / m.spec_drafts).toFixed(2)} tokens per step, ${percent(m.spec_accepted_tokens, m.spec_draft_tokens)} of draft tokens kept`]);
-  }
-  for (const gpu of status.gpus || []) {
-    rows.push([`GPU on ${status.runner || 'runner'}`, `${gpu.name}, ${gb(gpu.memory_used_mib)} of ${gb(gpu.memory_total_mib)} GB, ${Math.round(gpu.utilization)} % busy, ${Math.round(gpu.power_w)} W`]);
-  }
-  return rows;
-}
+const share = (part, whole) => (whole > 0 ? part / whole : null);
 
 /** @param {any} status @returns {string} */
 export function statusLine(status) {
@@ -48,47 +26,138 @@ export function statusLine(status) {
 }
 
 /**
+ * What the panel shows for one status answer. `before` is the answer of the poll before it.
+ * Each row has text and, where it is a share of something, a fill from 0 to 1.
+ * @returns {{busy: boolean, tokps: number, rows: Record<string, {text: string, fill?: number|null}>}}
+ */
+export function statusView(status, before) {
+  const m = status.metrics || {};
+  const made = before?.metrics?.generation_tokens !== undefined && m.generation_tokens !== undefined
+    ? Math.max(0, m.generation_tokens - before.metrics.generation_tokens) : 0;
+  const seconds = before?.at && status.at ? status.at - before.at : 0;
+  const tokps = seconds > 0 ? Math.round(made / seconds) : 0;
+  const gpu = (status.gpus || [])[0];
+  const cached = share(m.prompt_tokens_cached ?? m.prefix_cache_hits ?? 0, m.prompt_tokens ?? m.prefix_cache_queries ?? 0);
+  const kept = share(m.spec_accepted_tokens ?? 0, m.spec_draft_tokens ?? 0);
+  const none = { text: '–', fill: null };
+  return {
+    busy: Boolean(status.ok) && (m.running > 0 || tokps > 0),
+    tokps,
+    rows: {
+      endpoint: { text: status.detail || 'no answer' },
+      throughput: { text: m.generation_tokens === undefined ? '–' : tokps > 0 ? `${tokps} tok/s` : 'idle' },
+      requests: m.running === undefined ? none : { text: `${m.running} running, ${m.waiting ?? 0} waiting` },
+      memory: gpu ? { text: `${gb(gpu.memory_used_mib)} of ${gb(gpu.memory_total_mib)} GB`, fill: share(gpu.memory_used_mib, gpu.memory_total_mib) } : none,
+      load: gpu ? { text: `${Math.round(gpu.utilization)} %, ${Math.round(gpu.power_w)} W`, fill: gpu.utilization / 100 } : none,
+      cache: cached === null ? none : { text: `${Math.round(cached * 100)} % of prompt tokens reused`, fill: cached },
+      draft: m.spec_drafts > 0
+        ? { text: `${(1 + m.spec_accepted_tokens / m.spec_drafts).toFixed(2)} tokens per step, ${Math.round((kept ?? 0) * 100)} % kept`, fill: kept }
+        : none,
+      kv: m.kv_cache_usage === undefined ? none : { text: `${(m.kv_cache_usage * 100).toFixed(1)} % in use`, fill: m.kv_cache_usage },
+      generated: m.generation_tokens === undefined ? none
+        : { text: `${count(m.generation_tokens)} tokens in ${count(m.requests_done ?? 0)} requests` },
+    },
+  };
+}
+
+const ROWS = [
+  ['requests', 'Requests'], ['memory', 'GPU memory'], ['load', 'GPU load'], ['cache', 'Prompt cache'],
+  ['draft', 'Draft model'], ['kv', 'KV cache'], ['generated', 'Generated'],
+];
+
+/** Build the panel once. Later polls change text and transforms only. */
+function buildPanel(panel) {
+  const text = {};
+  const fill = {};
+  const row = (key, label) => {
+    text[key] = h('span', { class: 'status-value' });
+    fill[key] = h('i', {});
+    return h('div', { class: 'status-row', 'data-row': key },
+      h('dt', {}, label), h('dd', {}, text[key], h('span', { class: 'meter', 'aria-hidden': 'true' }, fill[key])));
+  };
+  const mark = h('span', { class: 'ripple-mark', 'aria-hidden': 'true' }, h('i', {}), h('i', {}), h('i', {}));
+  const line = h('b', { class: 'status-line' }, 'Checking Ripple');
+  const endpoint = h('span', { class: 'status-endpoint' });
+  const bars = Array.from({ length: SPARK_BARS }, () => h('i', {}));
+  const throughput = h('span', { class: 'status-value' });
+  const session = h('span', { class: 'status-value' });
+  panel.replaceChildren(
+    h('div', { class: 'status-head' }, mark, h('div', {}, line, endpoint)),
+    h('div', { class: 'status-spark' },
+      h('div', { class: 'spark', role: 'img', 'aria-label': 'Tokens per second, last 40 seconds' }, bars),
+      h('div', { class: 'status-spark-label' }, h('span', {}, 'Tokens per second'), throughput)),
+    h('dl', {}, ROWS.map(([key, label]) => row(key, label)),
+      h('div', { class: 'status-row' }, h('dt', {}, 'This session'), h('dd', {}, session))));
+  text.throughput = throughput;
+  return { mark, line, endpoint, bars, text, fill, session };
+}
+
+/**
  * @param {{button: HTMLElement, panel: HTMLElement, getTarget: () => object, getSession: () => string,
- *          onChange: (ok: boolean, detail: string) => void}} deps
+ *          onChange: (ok: boolean, detail: string, first: boolean) => void}} deps
  */
 export function createRippleStatus({ button, panel, getTarget, getSession, onChange }) {
+  const ui = buildPanel(panel);
+  /** @type {number[]} tokens per second of the last polls, newest last */
+  let history = new Array(SPARK_BARS).fill(0);
   let before = null;
   let last = null;
   let known = null;
+  let timer = 0;
 
   function paint() {
     if (!last) return;
-    button.dataset.state = last.ok ? (last.metrics?.running > 0 ? 'busy' : 'ok') : 'down';
+    const view = statusView(last, before);
+    button.dataset.state = last.ok ? (view.busy ? 'busy' : 'ok') : 'down';
     button.lastElementChild.textContent = statusLine(last);
     button.title = last.detail || '';
     if (panel.hidden) return;
-    const rows = last.ok ? statusRows(last, before) : [['Endpoint', last.detail || 'no answer']];
-    rows.push(['This session', getSession()]);
-    panel.replaceChildren(h('dl', {}, rows.map(([name, value]) => h('div', {}, h('dt', {}, name), h('dd', {}, value)))));
+    ui.mark.toggleAttribute('data-busy', view.busy);
+    ui.mark.dataset.state = last.ok ? 'ok' : 'down';
+    ui.line.textContent = statusLine(last);
+    ui.endpoint.textContent = view.rows.endpoint.text;
+    ui.session.textContent = getSession();
+    const top = Math.max(SPARK_FLOOR, ...history);
+    ui.bars.forEach((bar, index) => {
+      bar.style.transform = `scaleY(${Math.max(0.03, history[index] / top).toFixed(3)})`;
+      bar.toggleAttribute('data-on', history[index] > 0);
+    });
+    for (const [key, value] of Object.entries(view.rows)) {
+      if (ui.text[key]) ui.text[key].textContent = value.text;
+      if (ui.fill[key]) {
+        ui.fill[key].parentElement.hidden = value.fill == null;
+        ui.fill[key].style.transform = `scaleX(${Math.min(1, Math.max(0, value.fill ?? 0)).toFixed(3)})`;
+      }
+    }
   }
 
   async function poll() {
+    clearTimeout(timer);
     try {
       const status = await api.rippleStatus({ ...getTarget(), gpus: !panel.hidden });
       before = last && last.at ? last : before;
       last = status;
+      if (status.at && before?.at) history = [...history.slice(1), statusView(status, before).tokps];
     } catch (error) {
       last = { ok: false, detail: errorText(error) };
     }
     if (known !== last.ok) { onChange(last.ok, last.detail || '', known === null); known = last.ok; }
     paint();
+    timer = setTimeout(poll, panel.hidden ? POLL_CLOSED_MS : POLL_OPEN_MS);
   }
 
+  const close = () => { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); };
   button.addEventListener('click', () => {
     panel.hidden = !panel.hidden;
     button.setAttribute('aria-expanded', String(!panel.hidden));
-    if (!panel.hidden) { paint(); poll(); } // show what is known at once, then fetch the GPU numbers
+    if (!panel.hidden) { paint(); poll(); } // show what is known at once, then follow the server every second
   });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !panel.hidden) { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); } });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !panel.hidden) close(); });
   document.addEventListener('pointerdown', (event) => {
-    if (!panel.hidden && !panel.contains(event.target) && !button.contains(event.target)) { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); }
+    if (!panel.hidden && !panel.contains(event.target) && !button.contains(event.target)) close();
   });
-  setInterval(poll, POLL_MS);
   poll();
-  return { refresh: () => { before = null; last = null; return poll(); } };
+  return {
+    refresh: () => { before = null; last = null; history = new Array(SPARK_BARS).fill(0); return poll(); },
+  };
 }
