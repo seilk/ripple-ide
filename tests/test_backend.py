@@ -692,3 +692,44 @@ def test_http_edit_sends_a_prefilled_stream_request(ide):
     assert status == 200 and '"content": "total"' in body
     assert seen["stream"] is True and seen["stop"] == edit.STOP and seen["continue_final_message"] is True
     assert seen["messages"][-1] == {"role": "assistant", "content": complete.EMPTY_THINK + "```python\n"}
+
+
+def test_http_says_so_when_the_ripple_server_accepts_and_hangs_up(ide):
+    """A port forward does this while the server behind it is still starting. The browser used to get no answer at all."""
+    import socket
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    stop = threading.Event()
+
+    def hang_up():
+        listener.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+                connection.close()
+            except TimeoutError:
+                pass
+
+    threading.Thread(target=hang_up, daemon=True).start()
+    endpoint = {"endpoint": {"base_url": f"http://127.0.0.1:{listener.getsockname()[1]}/v1", "model": "ripple"}}
+    try:
+        results = [
+            _call(f"{ide}/api/complete", "POST", {**endpoint, "language": "python", "prefix": "x = ", "suffix": ""}),
+            _call(f"{ide}/api/chat", "POST", {**endpoint, "messages": [{"role": "user", "content": "hey"}]}),
+            _call(f"{ide}/api/edit", "POST", {**endpoint, "language": "python", "selection": "x = 1", "instruction": "y"}),
+        ]
+    finally:
+        stop.set()
+        listener.close()
+
+    for status, body, _ in results:
+        assert status == 502 and "does not answer" in body or "closed the connection" in body
+
+
+def test_http_ripple_status_for_mock_and_for_a_dead_endpoint(ide):
+    ok = json.loads(_call(f"{ide}/api/ripple-status", "POST", {"preset": "mock"})[1])
+    dead = json.loads(_call(f"{ide}/api/ripple-status", "POST", {"endpoint": {"base_url": "http://127.0.0.1:9/v1", "model": "m"}})[1])
+
+    assert ok["ok"] is True
+    assert dead["ok"] is False and "does not answer" in dead["detail"]

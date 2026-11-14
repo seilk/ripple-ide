@@ -7,6 +7,7 @@ runs without a model.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import os
@@ -21,6 +22,7 @@ from urllib.parse import urlparse
 
 UPSTREAM_TIMEOUT_S = 900
 COMPLETE_TIMEOUT_S = 30
+STATUS_TIMEOUT_S = 4
 RIPPLE_CONTEXT = 1_048_576
 RESERVED_BODY_KEYS = frozenset({"model", "messages", "stream", "stream_options", "tools", "tool_choice"})
 MODEL_NAME_RE = re.compile(r"^[\w./:@+-]{1,200}$")
@@ -195,9 +197,12 @@ def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPRes
         return urllib.request.urlopen(request, timeout=timeout_s)  # noqa: S310 - fixed preset URLs
     except urllib.error.HTTPError as exc:
         raise UpstreamError(exc.code, f"upstream {exc.code}", exc.read().decode(errors="replace")[:4000]) from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        reason = getattr(exc, "reason", exc)
-        raise UpstreamError(502, f"cannot reach {preset['base_url']}: {reason}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # Refused, timed out, or accepted and then closed with no answer. The last one is
+        # what a port forward does while the server behind it is still starting.
+        reason = getattr(exc, "reason", None) or exc or type(exc).__name__
+        raise UpstreamError(502, f"The Ripple server at {preset['base_url']} does not answer ({reason}). "
+                                 "Is it running, and is the port forward open?") from exc
 
 
 def stream_once(preset: dict, messages: list[dict], max_tokens: int, overrides: dict | None = None,
@@ -221,6 +226,23 @@ def content_events(text: str, pieces: int = 12) -> Iterator[bytes]:
         yield _chunk({"content": text[start:start + step]})
     yield _chunk(usage={"prompt_tokens": 0, "completion_tokens": max(1, len(text) // 4), "total_tokens": 0})
     yield _sse("[DONE]")
+
+
+def check(preset: dict) -> dict:
+    """Does the endpoint answer right now? Used for the status dot next to the profile list."""
+    if preset["base_url"] == "mock://":
+        return {"ok": True, "detail": "offline mock, no model"}
+    headers = {"Authorization": f"Bearer {preset_key(preset)}"} if preset_key(preset) else {}
+    request = urllib.request.Request(preset["base_url"].rstrip("/") + "/models", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=STATUS_TIMEOUT_S) as response:  # noqa: S310 - fixed or validated URL
+            response.read(1)
+        return {"ok": True, "detail": f"{preset['model']} at {preset['base_url']}"}
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "detail": f"{preset['base_url']} answered {exc.code}"}
+    except (OSError, http.client.HTTPException) as exc:
+        reason = getattr(exc, "reason", None) or exc or type(exc).__name__
+        return {"ok": False, "detail": f"{preset['base_url']} does not answer ({reason})"}
 
 
 def can_prefill(preset: dict) -> bool:
@@ -250,6 +272,8 @@ def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperatu
         return str(data["choices"][0]["message"].get("content") or "")
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise UpstreamError(502, f"unexpected completion answer: {exc}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise UpstreamError(502, f"the Ripple server closed the connection: {exc}") from exc
 
 
 # ------------------------------------------------------------------ mock

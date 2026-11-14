@@ -24,6 +24,7 @@ const LIVE_ANALYSIS_MS = 250;
 const LIVE_COMPILE_MS = 600;
 const MAX_FINDINGS_FOR_SUGGESTIONS = 8;
 const MAX_OUTPUT_CHARS = 200_000;
+const RIPPLE_STATUS_MS = 10_000;
 const COMPILE_LABEL = { cuda: 'Compile to PTX', ptx: 'Check PTX', triton: 'Run for PTX' };
 const PREF_KEY = { live: 'live', suggest: 'suggest', showDebugLines: 'debug-lines' };
 const MODES = { general: 'General', kernel: 'Kernel', lab: 'Ripple lab' };
@@ -497,6 +498,22 @@ async function loadLab() {
   });
 }
 
+/** The dot next to the profile list: does the endpoint of the active profile answer? */
+async function checkRipple() {
+  const dot = $('ripple-dot');
+  try {
+    const status = await api.rippleStatus(lab.target());
+    const changed = dot.dataset.state !== (status.ok ? 'ok' : 'down');
+    dot.dataset.state = status.ok ? 'ok' : 'down';
+    dot.title = status.ok ? `Ripple answers: ${status.detail}` : `Ripple does not answer: ${status.detail}`;
+    if (changed && !status.ok) setStatus(`Ripple does not answer: ${status.detail}`, 'error');
+    if (changed && status.ok && els.status.dataset.kind === 'error' && /Ripple does not answer/.test(els.status.textContent)) setStatus('Ripple answers again', 'ok');
+  } catch (error) {
+    dot.dataset.state = 'down';
+    dot.title = errorText(error);
+  }
+}
+
 /** @param {HTMLElement} button @param {'live'|'suggest'|'showDebugLines'} key @param {() => void} onChange */
 function bindToggle(button, key, onChange) {
   const paint = () => button.setAttribute('aria-pressed', String(state[key]));
@@ -771,6 +788,9 @@ async function boot() {
   await Promise.all([refreshFiles(), refreshToolchain()]);
   const mode = prefs.get('mode', 'general');
   setMode(mode in MODES ? mode : 'general');
+  checkRipple();
+  setInterval(checkRipple, RIPPLE_STATUS_MS);
+  els.preset.addEventListener('change', checkRipple);
   updatePrimary();
   const remembered = prefs.get('active', '');
   const first = state.files.find((f) => f.path === remembered) || state.files.find((f) => /readme/i.test(f.path)) || state.files[0];

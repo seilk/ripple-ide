@@ -35,6 +35,7 @@ export const api = {
   remove: (path) => request(`/api/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
   search: (query) => request(`/api/search?q=${encodeURIComponent(query)}`),
   compile: (payload) => request('/api/compile', json('POST', payload)),
+  rippleStatus: (target) => request('/api/ripple-status', json('POST', target)),
 };
 
 /** Stream one chat completion. */

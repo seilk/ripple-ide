@@ -13,6 +13,7 @@ The server edits files and runs compilers, so it listens on localhost unless
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import logging
 import os
@@ -157,7 +158,7 @@ class IdeHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlparse(self.path).path
-        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/edit", "/api/run"):
+        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/edit", "/api/run", "/api/ripple-status"):
             return self._json(404, {"error": "not found"})
         if not self._is_local():
             return self._json(403, {"error": "local requests only"})
@@ -170,6 +171,11 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return self._complete(body)
         if route == "/api/run":
             return self._run(body)
+        if route == "/api/ripple-status":
+            try:
+                return self._json(200, ripple_api.check(self._target(body)[0]))
+            except ripple_api.UpstreamError as exc:
+                return self._json(200, {"ok": False, "detail": exc.payload["error"]})
         if route == "/api/edit":
             try:
                 return self._edit(body)
@@ -278,10 +284,7 @@ class IdeHandler(SimpleHTTPRequestHandler):
         except ripple_api.UpstreamError as exc:
             return self._json(exc.status, exc.payload)
         self._start_sse()
-        with upstream:
-            for line in upstream:
-                self.wfile.write(line)
-                self.wfile.flush()
+        self._relay(upstream)
         return None
 
     def _chat(self, body: dict) -> None:
@@ -307,11 +310,18 @@ class IdeHandler(SimpleHTTPRequestHandler):
         except ripple_api.UpstreamError as exc:
             return self._json(exc.status, exc.payload)
         self._start_sse()
-        with upstream:
-            for line in upstream:
-                self.wfile.write(line)
-                self.wfile.flush()
+        self._relay(upstream)
         return None
+
+    def _relay(self, upstream) -> None:
+        """Pass an upstream event stream on to the browser. A stream that breaks just ends."""
+        try:
+            with upstream:
+                for line in upstream:
+                    self.wfile.write(line)
+                    self.wfile.flush()
+        except (OSError, http.client.HTTPException) as exc:
+            log.warning("stream ended early: %s", exc)
 
     def _start_sse(self) -> None:
         self.send_response(200)
