@@ -824,3 +824,47 @@ def test_block_keeps_thirty_lines_by_default_and_follows_the_line_limit():
     assert len(_block(METHOD + "        ", long_body).splitlines()) == complete.MAX_LINES == 30
     assert len(_block(METHOD + "        ", long_body, max_lines=5).splitlines()) == 5
     assert _block(METHOD + "        ", BODY, suffix="\n        return total\n").splitlines()[-1] == "            total += x"
+
+
+# ---------------------------------------------------------------- folder deletion
+
+
+def test_workspace_deletes_a_folder_with_everything_in_it(tmp_path):
+    ws = Workspace(tmp_path)
+    ws.write("notes/a.py", "a")
+    ws.write("notes/deep/b.py", "b")
+    ws.write("keep.py", "k")
+
+    gone = ws.delete_folder("notes")
+
+    assert sorted(gone) == ["notes/a.py", "notes/deep/b.py"]
+    assert [e["path"] for e in ws.list()] == ["keep.py"] and not (tmp_path / "notes").exists()
+
+
+def test_workspace_refuses_to_delete_the_root_a_file_or_a_folder_outside(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "x.py").write_text("x")
+    (root / "link").symlink_to(outside)
+    ws = Workspace(root)
+    ws.write("a.py", "a")
+
+    for path in ("a.py", "missing", "../outside", "link", ".", ""):
+        with pytest.raises(WorkspaceError):
+            ws.delete_folder(path)
+    assert (outside / "x.py").exists() and (root / "a.py").exists()
+
+
+def test_http_folder_delete(ide):
+    _call(f"{ide}/api/file", "PUT", {"path": "scratch/one.py", "content": "1"})
+    _call(f"{ide}/api/file", "PUT", {"path": "scratch/two/three.py", "content": "3"})
+
+    status, body, _ = _call(f"{ide}/api/folder?path=scratch", "DELETE")
+
+    assert status == 200 and sorted(json.loads(body)["files"]) == ["scratch/one.py", "scratch/two/three.py"]
+    assert not any(f["path"].startswith("scratch/") for f in json.loads(_call(f"{ide}/api/files")[1])["files"])
+    assert _call(f"{ide}/api/folder?path=scratch", "DELETE")[0] == 400
+    assert _call(f"{ide}/api/folder?path=..", "DELETE")[0] == 400
+    assert _call(f"{ide}/api/folder?path=k.ptx", "DELETE")[0] == 400  # a file is not a folder

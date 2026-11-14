@@ -222,6 +222,22 @@ async function deleteFile(path) {
   }
 }
 
+async function deleteFolder(path, fileCount) {
+  const unsaved = [...state.open.keys()].filter((file) => file.startsWith(`${path}/`) && isDirty(file)).length;
+  const what = `${fileCount} ${fileCount === 1 ? 'file' : 'files'}${unsaved ? `, ${unsaved} with unsaved changes` : ''}`;
+  if (!window.confirm(`Delete the folder ${path} and its ${what}? This cannot be undone.`)) return;
+  try {
+    await api.removeFolder(path);
+    for (const file of [...state.open.keys()].filter((open) => open.startsWith(`${path}/`))) closeFile(file, { force: true });
+    if (state.previewPath?.startsWith(`${path}/`)) state.previewPath = null;
+    await refreshFiles();
+    if (state.active) showResult();
+    setStatus(`Deleted ${path} (${fileCount} ${fileCount === 1 ? 'file' : 'files'})`, 'ok');
+  } catch (error) {
+    setStatus(errorText(error), 'error');
+  }
+}
+
 function setActive(path) {
   state.active = path;
   setStatus('');
@@ -684,6 +700,7 @@ function setupChrome() {
     list: $('file-list'), getActive: () => state.active,
     onOpen: (path) => openFile(path).catch((error) => setStatus(errorText(error), 'error')),
     onDelete: deleteFile,
+    onDeleteFolder: deleteFolder,
   });
   const open = (path, line) => openFile(path, line).catch((error) => setStatus(errorText(error), 'error'));
   palette = createPalette({

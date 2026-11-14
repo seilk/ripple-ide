@@ -157,15 +157,23 @@ class IdeHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         url = urlparse(self.path)
-        if url.path != "/api/file":
+        if url.path not in ("/api/file", "/api/folder"):
             return self._json(404, {"error": "not found"})
         if not self._is_local():
             return self._json(403, {"error": "local requests only"})
         path = (parse_qs(url.query).get("path") or [""])[0]
         try:
+            if url.path == "/api/folder":
+                files = self.workspace.delete_folder(path)
+                for gone in files:
+                    self.drafts.pop(gone, None)
+                return self._json(200, {"deleted": path, "files": files})
             self.workspace.delete(path)
+            self.drafts.pop(path, None)
         except WorkspaceError as exc:
             return self._json(400, {"error": str(exc)})
+        except OSError as exc:
+            return self._json(500, {"error": f"could not delete: {exc}"})
         return self._json(200, {"deleted": path})
 
     def do_POST(self) -> None:

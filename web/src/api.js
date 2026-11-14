@@ -33,6 +33,7 @@ export const api = {
   read: (path) => request(`/api/file?path=${encodeURIComponent(path)}`),
   write: (path, content) => request('/api/file', json('PUT', { path, content })),
   remove: (path) => request(`/api/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+  removeFolder: (path) => request(`/api/folder?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
   search: (query) => request(`/api/search?q=${encodeURIComponent(query)}`),
   compile: (payload) => request('/api/compile', json('POST', payload)),
   rippleStatus: (target) => request('/api/ripple-status', json('POST', target)),

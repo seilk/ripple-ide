@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -69,6 +70,18 @@ class Workspace:
         if not full.is_file():
             raise WorkspaceError(f"no such file: {rel}")
         full.unlink()
+
+    def delete_folder(self, rel: str) -> list[str]:
+        """Remove a folder and everything in it. Returns the listed files that went with it."""
+        full = self.resolve(rel)
+        if full == self.root:
+            raise WorkspaceError("the workspace folder itself cannot be deleted")
+        if full.is_symlink() or not full.is_dir():
+            raise WorkspaceError(f"no such folder: {rel}")
+        prefix = full.relative_to(self.root).as_posix() + "/"
+        gone = [entry["path"] for entry in self.list() if entry["path"].startswith(prefix)]
+        shutil.rmtree(full)
+        return gone
 
     def search(self, query: str) -> list[dict]:
         """Plain-text, case-insensitive search over the listed files."""

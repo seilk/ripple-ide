@@ -1,4 +1,4 @@
-// Workspace file tree: folders that fold, one row per file, delete on hover.
+// Workspace file tree: folders that fold, one row per file or folder, delete on hover.
 
 import { extOf, h, prefs } from './ui.js';
 
@@ -25,9 +25,10 @@ function buildTree(files) {
  *   getActive: () => string|null,
  *   onOpen: (path: string) => void,
  *   onDelete: (path: string) => void,
+ *   onDeleteFolder: (path: string, fileCount: number) => void,
  * }} deps
  */
-export function createTree({ list, getActive, onOpen, onDelete }) {
+export function createTree({ list, getActive, onOpen, onDelete, onDeleteFolder }) {
   let collapsed;
   try { collapsed = new Set(JSON.parse(prefs.get('collapsed', '[]'))); } catch { collapsed = new Set(); }
   /** @type {Array<{path: string}>} */
@@ -38,14 +39,16 @@ export function createTree({ list, getActive, onOpen, onDelete }) {
     for (const name of [...node.dirs.keys()].sort()) {
       const path = `${prefix}${name}`;
       const open = !collapsed.has(path);
-      out.push(h('li', {}, h('button', {
+      const inside = files.filter((file) => file.path.startsWith(`${path}/`)).length;
+      out.push(h('li', { class: 'file-row' }, h('button', {
         class: 'file folder', type: 'button', 'aria-expanded': String(open), style: `--depth:${depth}`,
         onclick: () => {
           if (open) collapsed.add(path); else collapsed.delete(path);
           prefs.set('collapsed', JSON.stringify([...collapsed]));
           render(files);
         },
-      }, h('span', { class: 'ext' }, open ? '▾' : '▸'), h('span', { class: 'name' }, name))));
+      }, h('span', { class: 'ext' }, open ? '▾' : '▸'), h('span', { class: 'name' }, name)),
+      h('button', { class: 'file-delete', type: 'button', 'aria-label': `Delete folder ${path}`, title: 'Delete folder', onclick: () => onDeleteFolder(path, inside) }, '×')));
       if (open) out.push(...rows(node.dirs.get(name), depth + 1, `${path}/`));
     }
     for (const file of [...node.files].sort((a, b) => a.name.localeCompare(b.name))) {

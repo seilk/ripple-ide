@@ -327,6 +327,27 @@ try {
     assert.equal(existsSync(join(workspace, 'notes/todo.py')), false);
   });
 
+  await step('deletes a folder with its files and closes their tabs', async () => {
+    for (const path of ['trash/a.py', 'trash/deep/b.py']) {
+      await page.locator('#new-file').click();
+      await page.locator('#new-file-path').fill(path);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction((p) => document.querySelector('.tab[aria-selected="true"]')?.title === p, path);
+    }
+    const tabsBefore = await page.locator('.tab').count();
+    let asked = '';
+    page.once('dialog', (dialog) => { asked = dialog.message(); dialog.accept(); });
+    const folder = page.locator('#file-list .file-row', { has: page.locator('.file.folder', { hasText: 'trash' }) }).first();
+    await folder.hover();
+    await folder.locator('.file-delete').click();
+    await page.waitForFunction(() => !document.querySelector('#file-list').textContent.includes('trash'));
+    assert.match(asked, /Delete the folder trash and its 2 files\?/);
+    assert.equal(existsSync(join(workspace, 'trash')), false);
+    assert.equal(await page.locator('.tab').count(), tabsBefore - 2);
+    assert.match(await page.locator('#status').innerText(), /Deleted trash \(2 files\)/);
+    assert.equal(existsSync(join(workspace, 'kernels/saxpy.cu')), true); // nothing else went with it
+  });
+
   await step('mock Ripple reads a kernel, compiles it and reports', async () => {
     await openFromTree('rowsum.cu');
     await page.locator('#quick button', { hasText: 'Why is this kernel slow' }).click();
