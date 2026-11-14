@@ -10,6 +10,7 @@ import { createDiffEditor, createEditor, languageFor, loadMonaco } from './edito
 import { registerQuickFixes } from './fixes.js';
 import { registerKernelLanguages } from './kernel-lang.js';
 import { createLab } from './lab.js';
+import { createInlineEdit } from './inline-edit.js';
 import { createLinker } from './link.js';
 import { createPalette } from './palette.js';
 import { analyzePtx, basename } from './ptx-analyze.js';
@@ -66,7 +67,7 @@ const els = {
   confirmDialog: /** @type {HTMLDialogElement} */ ($('confirm-dialog')),
 };
 
-let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette; let lab;
+let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette; let lab; let inlineEdit;
 
 function setStatus(text, kind = '') {
   els.status.textContent = text;
@@ -509,8 +510,8 @@ function bindToggle(button, key, onChange) {
 }
 
 function showSuggestState({ phase, source, ms, message }) {
-  const from = source === 'ripple' ? `Ripple, ${ms} ms` : 'idioms';
-  if (phase === 'shown') lab.noteSuggestion(ms);
+  const from = source === 'ripple' ? `Ripple, ${ms} ms` : source === 'kept' ? 'kept while typing' : 'idioms';
+  if (phase === 'shown' && source !== 'kept') lab.noteSuggestion(ms);
   els.suggestState.textContent = phase === 'asking' ? 'Suggesting'
     : phase === 'shown' ? `Tab accepts (${from})`
       : phase === 'error' ? `Suggestion failed: ${message}` : '';
@@ -701,6 +702,20 @@ function setupRipple() {
     tools,
   });
   agent.setQuick(QUICK_PROMPTS.general);
+  inlineEdit = createInlineEdit({
+    monaco, editor: srcEditor, bar: /** @type {HTMLFormElement} */ ($('edit-bar')),
+    input: /** @type {HTMLInputElement} */ ($('edit-input')),
+    getRequest: () => ({ target: lab.target(), options: lab.chatOptions() }),
+    getFile: () => (state.active ? {
+      path: state.active,
+      language: fileKind(state.active) === 'triton' ? 'triton' : state.open.get(state.active).model.getLanguageId(),
+    } : null),
+    onStatus: setStatus,
+  });
+  srcEditor.addAction({
+    id: 'ripple.edit', label: 'Ripple: Edit the selection', contextMenuGroupId: 'ide', contextMenuOrder: 3,
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK], run: () => inlineEdit.open(),
+  });
   registerQuickFixes({ monaco, askRipple: (prompt) => agent.send(prompt) });
   const pathOf = (model) => model.uri.path.replace(/^\//, '');
   registerInlineSuggestions({
@@ -728,6 +743,7 @@ function commands() {
     { label: 'New file', run: () => els.newFile.click() },
     { label: 'Save file', hint: '⌘S', run: saveActive },
     { label: 'Run or compile the active file', hint: '⌘↵', run: doPrimary },
+    { label: 'Ripple: Edit the selection', hint: '⌘K', run: () => inlineEdit.open() },
     { label: 'Ripple: Ask about selection', hint: '⌘L', run: askAboutSelection },
     { label: `Inline suggestions: turn ${state.suggest ? 'off' : 'on'}`, run: toggle(els.toggleSuggest) },
     { label: 'Lab: Run benchmark', detail: 'speed and accuracy of the active profile', run: () => { setMode('lab'); lab.runBenchmark(); } },

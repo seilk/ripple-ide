@@ -55,6 +55,21 @@ export function createRippleTools(ide) {
       };
     },
 
+    edit_file: async ({ path, old_text: oldText, new_text: newText }) => {
+      if (typeof path !== 'string' || !path) throw new Error('path is required');
+      if (typeof oldText !== 'string' || !oldText || typeof newText !== 'string') throw new Error('old_text and new_text are required');
+      const before = await ide.readText(path);
+      const first = before.indexOf(oldText);
+      if (first === -1) return { error: 'old_text was not found in the file. Read the file and copy the text exactly.' };
+      if (before.indexOf(oldText, first + 1) !== -1) return { error: 'old_text occurs more than once. Include more lines around it.' };
+      const after = before.slice(0, first) + newText + before.slice(first + oldText.length);
+      if (!(await ide.confirmWrite(path, before, after))) {
+        return { rejected: true, message: 'The user rejected this change.' };
+      }
+      await ide.applyWrite(path, after);
+      return { edited: path, replaced_chars: oldText.length, new_chars: newText.length };
+    },
+
     write_file: async ({ path, content }) => {
       if (typeof path !== 'string' || !path) throw new Error('path is required');
       if (typeof content !== 'string') throw new Error('content must be a string');
@@ -76,7 +91,9 @@ export function systemPrompt({ active, kernel, toolchain, arch, canRun }) {
     'You are Ripple, the coding model inside Ripple IDE. You work on the files of the open project with tools.',
     'Read before you edit. Use search_files to find things. Check your work: run the file or compile the kernel '
       + 'after an edit, and report what the tool showed. Do not claim a result that no tool showed.',
-    'write_file replaces the whole file and the user reviews a diff. Keep edits small and explain each one in one line.',
+    'To change an existing file use edit_file: it replaces one exact piece of text and is much faster than write_file, '
+      + 'which sends the whole file again. Use write_file for new files only. The user reviews a diff of every change. '
+      + 'Keep edits small and explain each one in one line.',
     canRun ? 'run_file runs a .py, .js, .mjs or .sh file after the user allows it.' : 'run_file is off on this server.',
     `Active file: ${active || '(none)'}`,
   ];

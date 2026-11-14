@@ -21,7 +21,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from ide import complete, ripple_api, runner
+from ide import complete, edit, ripple_api, runner
 from ide.toolchain import CompileRequest, Toolchain, ToolchainError, validate_flags
 from ide.workspace import Workspace, WorkspaceError
 
@@ -157,7 +157,7 @@ class IdeHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlparse(self.path).path
-        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/run"):
+        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/edit", "/api/run"):
             return self._json(404, {"error": "not found"})
         if not self._is_local():
             return self._json(403, {"error": "local requests only"})
@@ -170,6 +170,11 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return self._complete(body)
         if route == "/api/run":
             return self._run(body)
+        if route == "/api/edit":
+            try:
+                return self._edit(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return None
         try:
             return self._chat(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -238,13 +243,46 @@ class IdeHandler(SimpleHTTPRequestHandler):
         if preset["base_url"] == "mock://":
             text, source = complete.mock_complete(request), "idioms"
         else:
+            plan = complete.plan_prefill(request) if ripple_api.can_prefill(preset) and not request.reason else None
             try:
-                raw = ripple_api.complete_once(preset, complete.build_messages(request),
-                                               complete.MAX_TOKENS, complete.TEMPERATURE, overrides)
+                if plan:
+                    raw = ripple_api.complete_once(preset, plan.messages, plan.max_tokens, complete.TEMPERATURE,
+                                                   overrides, plan.prefill, plan.stop, plan.pattern)
+                else:
+                    raw = ripple_api.complete_once(preset, complete.build_messages(request),
+                                                   complete.MAX_TOKENS, complete.TEMPERATURE, overrides)
             except ripple_api.UpstreamError as exc:
                 return self._json(exc.status, exc.payload)
-            text, source = complete.clean_completion(raw, request), "ripple"
+            text = complete.finish_prefilled(raw, request, plan) if plan else complete.clean_completion(raw, request)
+            source = "ripple"
         return self._json(200, {"completion": text, "source": source, "ms": round((time.time() - started) * 1000)})
+
+    def _edit(self, body: dict) -> None:
+        try:
+            preset, overrides = self._target(body)
+            request = edit.parse_request(body)
+        except ripple_api.UpstreamError as exc:
+            return self._json(exc.status, exc.payload)
+        except ValueError as exc:
+            return self._json(400, {"error": str(exc)})
+        if preset["base_url"] == "mock://":
+            self._start_sse()
+            for payload in ripple_api.content_events(edit.mock_edit(request)):
+                self.wfile.write(payload)
+                self.wfile.flush()
+                time.sleep(self.mock_delay_s)
+            return None
+        try:
+            upstream = ripple_api.stream_once(preset, edit.build_messages(request), request.max_tokens, overrides,
+                                              edit.prefill(request), edit.STOP)
+        except ripple_api.UpstreamError as exc:
+            return self._json(exc.status, exc.payload)
+        self._start_sse()
+        with upstream:
+            for line in upstream:
+                self.wfile.write(line)
+                self.wfile.flush()
+        return None
 
     def _chat(self, body: dict) -> None:
         messages = body.get("messages")

@@ -70,11 +70,16 @@
       <div id="split" class="split">
         <div id="src-pane" class="pane">
           <div id="src-editor" class="editor"></div>
+          <form id="edit-bar" class="edit-bar" hidden>
+            <input id="edit-input" type="text" spellcheck="false" autocomplete="off" placeholder="Describe the change to the selected lines" aria-label="Change to make">
+            <span class="mono">Enter applies, Esc closes</span>
+          </form>
           <div id="welcome" class="empty welcome">
             <b>Open a file from the list</b>
             <span>Go to file <kbd>⌘P</kbd></span>
             <span>Search in files <kbd>⇧⌘F</kbd></span>
             <span>Commands and modes <kbd>⇧⌘P</kbd></span>
+            <span>Edit the selection with Ripple <kbd>⌘K</kbd></span>
             <span>Ask Ripple about a selection <kbd>⌘L</kbd></span>
           </div>
         </div>

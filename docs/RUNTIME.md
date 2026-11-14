@@ -29,6 +29,34 @@ python3 server.py
 
 With vLLM this is `--reasoning-parser ripple --enable-auto-tool-choice --tool-call-parser ripple`.
 
+## Serving Ripple for the IDE
+
+What ran for the measurements in the README:
+
+```bash
+# vLLM nightly (the released 0.33.0 has no Ricursive model class and no `ripple` parsers)
+uv pip install -U vllm --pre \
+  --extra-index-url https://wheels.vllm.ai/nightly/cu130 \
+  --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
+
+vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 --host 127.0.0.1 --port 8000 \
+  --served-model-name ricursiveAI/Ripple-65B-Preview-NVFP4 ripple \
+  --tensor-parallel-size 1 --max-model-len 262144 \
+  --reasoning-parser ripple --enable-auto-tool-choice --tool-call-parser ripple
+```
+
+From the machine that runs the IDE:
+
+```bash
+tools/ripple-forward.sh <ssh-host> 8000 8000          # keeps the port forward open
+RIPPLE_RUNTIME_URL=http://127.0.0.1:8000/v1 RIPPLE_RUNTIME_MODEL=ripple python3 server.py
+```
+
+The IDE uses three server features beyond plain chat: continuing a final
+assistant message (`continue_final_message`), stop strings, and structured
+output by regular expression (`structured_outputs.regex`). vLLM and SGLang have
+them. Without them the IDE falls back to a plain instruction, which is slow.
+
 ## Trying a runtime change from inside the IDE
 
 1. Start the changed runtime on its own port, next to the current one.
@@ -48,11 +76,13 @@ profile.
 ## Inline suggestions
 
 The same endpoint serves ghost text: one short request per pause in typing,
-`stream: false`, `max_tokens: 192`, `temperature: 0.2`. The prompt is a
-fill-in-the-middle request for a chat model (text before and after the cursor),
-and the server cleans the answer (code fences, repeated text). Latency of this
-call is what the user feels while typing, so it gains the most from a fast
-runtime. The status bar shows the time of each suggestion.
+`stream: false`, `temperature: 0`, 64 tokens for the rest of a line or 192 for
+a block. Ripple has no fill-in-the-middle mode, so the request starts the
+assistant turn for the model: an empty think block, a code fence and the current
+line. The model continues that line and a stop string ends the answer at the
+line end. Latency of this call is what the user feels while typing, so it gains
+the most from a fast runtime: at 80 tokens per second a 10-token line is 125 ms
+of generation. The status bar shows the time of each suggestion.
 
 ## What the IDE shows about the runtime
 

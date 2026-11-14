@@ -31,8 +31,9 @@ the browser.
 | Languages | Every language Monaco ships, plus CUDA (`.cu`) and PTX (`.ptx`). |
 | Files | Folder tree, new file, delete. Go to file `⌘P`. Search in files `⇧⌘F`. |
 | Inline suggestions | Ghost text after a short pause. `Tab` accepts, `Esc` dismisses, `⌘→` accepts a word. Toggle in the status bar. |
+| Inline edit | `⌘K` on a selection: describe the change, and Ripple rewrites those lines in place while the text streams in. One undo brings the old text back. |
 | Run | `⌘↵` runs `.py`, `.js`, `.mjs` and `.sh` files and streams the output. |
-| Ripple panel | Tools: `list_files`, `read_file`, `search_files`, `write_file`, `run_file`, `compile_kernel`. A write shows a diff and a run asks first. |
+| Ripple panel | Tools: `list_files`, `read_file`, `search_files`, `edit_file`, `write_file`, `run_file`, `compile_kernel`. An edit shows a diff and a run asks first. |
 | Ask about code | `⌘L` puts the selection in the prompt. |
 | Layout | Drag any divider. Double-click it to reset. Arrow keys work on a focused divider. |
 
@@ -107,20 +108,48 @@ python3 server.py --host <address> --allow-host <dns-name> --allow-run   # also 
 Without `--allow-run`, a shared server refuses the Run button and `run_file`.
 Without `--allow-custom-endpoints`, it also refuses custom URLs in the lab.
 
+## Speed with a real Ripple
+
+Measured with Ripple-65B Preview (NVFP4) on vLLM, one B200, the IDE on another
+machine behind an SSH forward (13 ms round trip). See `ide/complete.py` for how
+a chat model is made to act as a completion model.
+
+| What | Result |
+|------|--------|
+| Suggestion, lab cases | 14 of 14 pass, median 116 ms, 95th percentile 644 ms |
+| Same, first attempt (plain instruction) | empty answers: the model reasoned first and used up its tokens |
+| Same, with an empty think block only | 7 of 12, median 1106 ms |
+| Suggestion while typing in a 35k-character file | median 173 ms; the prefix cache halves it (124 ms against 228 ms for the same 2000-token context) |
+| Inline edit of a 2-line function into 5 lines | 0.71 s, first text after 95 ms |
+| Agent: read a kernel, compile, fix a double literal, compile again | 8.2 s, first token 87 ms |
+
+What the IDE does for speed: starts the model's reply for it so it answers
+without reasoning; stops at the end of the line; holds the answer to a line
+pattern so a half-typed word is finished; sends a context window whose start
+moves in steps so the server's prefix cache keeps hitting; shows the rest of a
+suggestion again with no request while you type through it; waits 75 ms, and
+not at all right after an accept; and edits with `edit_file`, which sends the
+changed text only.
+
+`tests/e2e/real.mjs` runs these flows in a browser against a live server, and
+`tools/bench-cli.mjs` runs the suggestion cases from a terminal.
+
 ## Tests
 
 ```bash
 python3 -m pytest tests -q          # server, toolchain, workspace, runner, completion
 node --test tests/*.test.mjs        # PTX analyzer, benchmark maths
 tests/e2e/run.sh                    # browser test (needs Playwright + Chromium)
+node tests/e2e/real.mjs             # the same kind of run against a live Ripple (set RIPPLE_RUNTIME_URL)
 ```
 
 ## Status
 
-Checked on macOS with the clang NVPTX preview and the mock Ripple.
-Not yet run: a live Ripple endpoint (chat and inline suggestions), real
-`nvcc`/`ptxas`, the `--ssh` runner, and the Triton path. Stand-in servers and
-tools cover that plumbing in tests.
+Checked with a live Ripple-65B (NVFP4, vLLM nightly, one B200): chat with
+tools, inline suggestions, inline edit and the lab benchmark. Kernel tools were
+checked on macOS with the clang NVPTX preview.
+Not yet run: real `nvcc`/`ptxas`, the `--ssh` runner, and the Triton path.
+Stand-in tools cover that plumbing in tests.
 
 ## Layout
 
@@ -128,7 +157,8 @@ tools cover that plumbing in tests.
 server.py            HTTP routes
 ide/workspace.py     project files: list, read, write, delete, search
 ide/runner.py        run a file and stream its output
-ide/complete.py      inline completion: prompt, answer cleaning, idiom table
+ide/complete.py      inline completion: prefilled request, line pattern, cache-friendly window
+ide/edit.py          inline edit: streamed rewrite of a selection
 ide/ripple_api.py    Ripple endpoints and the mock
 ide/toolchain.py     nvcc / clang NVPTX / Triton -> PTX, ptxas log parsing
 web/src/             editor, file tree, palette, suggestions, Ripple panel,

@@ -329,7 +329,7 @@ try {
     await page.locator('#bench-run').click();
     await page.waitForSelector('.bench-table tbody tr');
     const first = await page.locator('.bench-table tbody tr').first().innerText();
-    assert.match(first, /Mock Ripple \(offline\)\s+9\/12/); // the idiom table knows 9 of the 12 cases
+    assert.match(first, /Mock Ripple \(offline\)\s+9\/14/); // the idiom table knows 9 of the 14 cases
     assert.match(first, /baseline/);
 
     // A copy of the profile, pointed at a local stand-in for a tuned Ripple server.
@@ -344,7 +344,7 @@ try {
     await page.locator('#bench-run').click();
     await page.waitForFunction(() => document.querySelectorAll('.bench-table tbody tr').length === 2);
     const tuned = await page.locator('.bench-table tbody tr').first().innerText();
-    assert.match(tuned, /Tuned runtime\s+2\/12/); // the stand-in gives one fixed answer; it fits two patterns
+    assert.match(tuned, /Tuned runtime\s+2\/14/); // the stand-in gives one fixed answer; it fits two patterns
     assert.equal(await page.locator('.bench-table tbody tr').first().locator('.delta[data-dir="up"]').first().innerText(), '\u22127');
     assert.match(tuned, /\d+ ms\+\d+/); // slower than the offline mock, and the table says so
     assert.deepEqual([fakeSeen.model, fakeSeen.max_tokens, fakeSeen.top_k], ['ripple-opt', 48, 20]);

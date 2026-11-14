@@ -245,6 +245,20 @@ body[data-resizing="y"] * { cursor: row-resize !important; }
 .ripple { display: grid; grid-template-rows: var(--row-h) minmax(0, 1fr) auto auto; background: var(--surface-deep); border-left: 1px solid var(--hairline); min-height: 0; }
 .ripple .pane-head span { margin-left: auto; }
 
+/* Inline edit bar, over the top of the source editor. */
+.edit-bar {
+  position: absolute; z-index: 4; top: var(--space-2); left: var(--space-8); right: var(--space-4);
+  display: flex; align-items: center; gap: var(--space-3); height: 36px; padding: 0 var(--space-3);
+  background: var(--surface-card); border: 1px solid var(--hairline-strong); border-radius: var(--radius-control);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); color: var(--text-3);
+}
+.edit-bar[hidden] { display: none; }
+.edit-bar input { flex: 1; min-width: 0; height: 100%; border: 0; background: none; outline: none; }
+.edit-bar input::placeholder { color: var(--text-3); }
+.edit-bar[data-busy] input { color: var(--text-2); }
+.edit-target { background: rgba(237, 237, 237, 0.06); }
+.edit-live { background: var(--accent-wash); }
+
 /* Monaco decorations. The highlighter band is the one accent in the listings. */
 .linked-line { background: var(--accent-wash); }
 .linked-mark { background: var(--accent); width: 2px !important; margin-left: 4px; }

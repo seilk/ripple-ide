@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ide import complete, ripple_api, runner
+from ide import complete, edit, ripple_api, runner
 from ide.toolchain import (CompileRequest, Toolchain, ToolchainError, parse_diagnostics, parse_ptxas_log,
                            ptx_feature_for, validate_flags, validate_request)
 from ide.workspace import Workspace, WorkspaceError
@@ -325,7 +325,7 @@ def test_completion_prompt_carries_findings_and_both_sides():
                                   "findings": ["fp64 at source line 7"]})
     system, user = complete.build_messages(req)
 
-    assert len(req.prefix) == complete.MAX_PREFIX_CHARS
+    assert 4000 <= len(req.prefix) <= complete.MAX_PREFIX_CHARS
     assert "f suffix" in system["content"]
     assert "fp64 at source line 7" in user["content"] and "<after_cursor>\ntail" in user["content"]
 
@@ -350,7 +350,7 @@ def test_http_complete_uses_the_model_answer(ide, monkeypatch):
     class Upstream(http.server.BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             sent = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            assert sent["stream"] is False and sent["max_tokens"] == complete.MAX_TOKENS
+            assert sent["stream"] is False and sent["max_tokens"] == complete.SINGLE_LINE_MAX_TOKENS
             answer = json.dumps({"choices": [{"message": {"content": "```\n  int i = threadIdx.x;\n```"}}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -536,3 +536,159 @@ def test_http_custom_endpoint_gets_the_overrides(ide):
     assert _call(f"{ide}/api/complete", "POST", {"endpoint": {"base_url": "http://example.com/v1", "model": "m"},
                                                    "language": "cuda", "prefix": "x"})[0] == 400
     assert json.loads(_call(f"{ide}/api/presets")[1])["custom_endpoints"] is True
+
+
+def test_prefill_plan_starts_the_reply_with_the_current_line():
+    plan = complete.plan_prefill(_req("void f() {\n  int i = ", suffix="\n}"))
+
+    assert plan.prefill == complete.EMPTY_THINK + "```cpp\n  int i ="
+    assert plan.stop[:2] == ["\n", "```"] and plan.strip_space and plan.typed_word == ""
+    assert "<before_cursor>\nvoid f() {\n</before_cursor>" in plan.messages[1]["content"]  # without the current line
+    assert "GPU kernel" in plan.messages[0]["content"]
+
+
+def test_prefill_plan_backs_up_over_a_half_typed_word():
+    """Seen with the real model: a prefill that ends inside a word gets an empty answer."""
+    req = _req("import math\nimport num", suffix="\n", language="python")
+    plan = complete.plan_prefill(req)
+
+    assert plan.prefill.endswith("```python\nimport") and plan.typed_word == "num"
+    assert complete.finish_prefilled(" numpy as np", req, plan) == "py as np"
+    assert complete.finish_prefilled(" os", req, plan) == ""  # not the word being typed
+
+
+def test_prefill_plan_at_a_line_start_allows_several_lines():
+    req = _req("def f(n):\n    ", suffix="\n\nprint(f(3))\n", language="python")
+    plan = complete.plan_prefill(req)
+
+    assert plan.prefill == complete.EMPTY_THINK + "```python\n" and "\n" not in plan.stop
+    assert complete.finish_prefilled("    if n < 2:\n        return n\n", req, plan) == "if n < 2:\n        return n"
+
+
+def test_finish_drops_text_that_already_follows_the_cursor():
+    req = _req("const names = users.map((user) => ", suffix=");\n", language="javascript")
+    plan = complete.plan_prefill(req)
+
+    assert complete.finish_prefilled(" user.name);", req, plan) == "user.name"
+
+
+def test_http_suggestion_request_is_prefilled_unless_reasoning_is_on(ide):
+    import http.server
+    seen = []
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            answer = json.dumps({"choices": [{"message": {"content": " threadIdx.x;"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+        def log_message(self, *args):
+            pass
+
+    upstream = http.server.HTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    body = {"endpoint": {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple"},
+            "language": "cuda", "prefix": "int i = ", "suffix": ""}
+    try:
+        status, fast_body, _ = _call(f"{ide}/api/complete", "POST", body)
+        _call(f"{ide}/api/complete", "POST", {**body, "options": {"reason": True}})
+    finally:
+        upstream.shutdown()
+
+    fast, slow = seen
+    assert json.loads(fast_body)["completion"] == "threadIdx.x;"
+    assert fast["messages"][-1] == {"role": "assistant", "content": complete.EMPTY_THINK + "```cpp\nint i ="}
+    assert fast["continue_final_message"] is True and fast["add_generation_prompt"] is False and fast["stop"][:2] == ["\n", "```"]
+    assert fast["structured_outputs"] == {"regex": "[^\\n]+\\n"} and fast["max_tokens"] == complete.SINGLE_LINE_MAX_TOKENS
+    assert fast["temperature"] == 0.0
+    assert slow["messages"][-1]["role"] == "user" and "continue_final_message" not in slow and "stop" not in slow
+
+
+def test_context_window_start_holds_still_while_typing():
+    lines = "".join(f"line {n:05d} of the file\n" for n in range(1000))  # 24 chars a line
+    starts = {complete.stable_window(lines + "x" * typed, 6000)[:24] for typed in range(0, 1500, 7)}
+
+    assert len(starts) <= 2  # at most one move in 1500 typed characters
+    window = complete.stable_window(lines, 6000)
+    assert window.startswith("line ") and 4000 <= len(window) <= 6000
+    assert complete.stable_window("short", 6000) == "short"
+
+
+@pytest.mark.parametrize(("prefix", "pattern"), [
+    ("import num", " ?num[^\\n]*\\n"),          # half-typed word: the answer starts with it
+    ("  console.", "[^\\n]+\\n"),               # open line: some text is required
+    ("  x = ", "[^\\n]+\\n"),
+    ("  return 0;", None),                           # complete line: free to stay empty
+    ("if ready:", None),
+])
+def test_line_pattern_follows_how_the_line_ends(prefix, pattern):
+    assert complete.plan_prefill(_req("x\n" + prefix)).pattern == pattern
+
+
+def test_single_line_requests_get_a_small_token_budget():
+    assert complete.plan_prefill(_req("  x = ")).max_tokens == complete.SINGLE_LINE_MAX_TOKENS
+    assert complete.plan_prefill(_req("def f():\n    ")).max_tokens == complete.MAX_TOKENS
+    assert complete.plan_prefill(_req("def f():\n    ")).pattern is None
+
+
+# ---------------------------------------------------------------- inline edit
+
+
+def test_edit_request_validation_and_token_budget():
+    req = edit.parse_request({"language": "python", "selection": "x = 1\n" * 400, "instruction": " rename x to total ",
+                              "before": "a" * 9000, "after": "b" * 9000, "path": "a.py"})
+
+    assert (len(req.before), len(req.after), req.instruction) == (edit.CONTEXT_CHARS, edit.CONTEXT_CHARS, "rename x to total")
+    assert req.max_tokens == len(req.selection) // 2 + edit.MAX_TOKENS_FLOOR
+    assert edit.prefill(req) == complete.EMPTY_THINK + "```python\n"
+    assert "<selected>\nx = 1" in edit.build_messages(req)[1]["content"]
+    for bad in ({"language": "python", "selection": "  ", "instruction": "x"},
+                {"language": "python", "selection": "x", "instruction": ""},
+                {"language": "python", "selection": "x" * 30000, "instruction": "y"}):
+        with pytest.raises(ValueError):
+            edit.parse_request(bad)
+
+
+def test_http_edit_mock_streams_the_new_text(ide):
+    status, body, _ = _call(f"{ide}/api/edit", "POST", {
+        "preset": "mock", "language": "python", "path": "a.py", "selection": "    return 1", "instruction": "use two"})
+    text = "".join(json.loads(line[6:])["choices"][0]["delta"].get("content", "")
+                   for line in body.splitlines() if line.startswith("data: {") and json.loads(line[6:])["choices"])
+
+    assert status == 200 and text == "    # mock edit: use two\n    return 1" and body.rstrip().endswith("[DONE]")
+    assert _call(f"{ide}/api/edit", "POST", {"preset": "mock", "language": "python", "selection": "", "instruction": "x"})[0] == 400
+
+
+def test_http_edit_sends_a_prefilled_stream_request(ide):
+    import http.server
+    seen = {}
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for word in ("total", " = 2\n"):
+                self.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': word}}]})}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+
+        def log_message(self, *args):
+            pass
+
+    upstream = http.server.HTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    try:
+        status, body, _ = _call(f"{ide}/api/edit", "POST", {
+            "endpoint": {"base_url": f"http://127.0.0.1:{upstream.server_address[1]}/v1", "model": "ripple"},
+            "language": "python", "selection": "x = 1", "instruction": "call it total and use 2"})
+    finally:
+        upstream.shutdown()
+
+    assert status == 200 and '"content": "total"' in body
+    assert seen["stream"] is True and seen["stop"] == edit.STOP and seen["continue_final_message"] is True
+    assert seen["messages"][-1] == {"role": "assistant", "content": complete.EMPTY_THINK + "```python\n"}

@@ -51,6 +51,7 @@ PRESETS: dict[str, dict] = {
         "model": os.environ.get("RIPPLE_RUNTIME_MODEL", "ricursiveAI/Ripple-65B-Preview"),
         "key_env": ["RIPPLE_RUNTIME_KEY"],
         "extra": {},
+        "prefill": True,
         "note": "Set RIPPLE_RUNTIME_URL (and RIPPLE_RUNTIME_MODEL) to the team's server. See docs/RUNTIME.md.",
     },
     "ollama": {
@@ -131,7 +132,7 @@ def resolve_target(body: dict, custom_enabled: bool = True, extra_hosts: frozens
     if not MODEL_NAME_RE.match(model):
         raise UpstreamError(400, "endpoint.model is missing or has characters that are not allowed")
     return {"label": "Custom endpoint", "base_url": url.geturl().rstrip("/"), "model": model,
-            "key_env": ["RIPPLE_RUNTIME_KEY"], "extra": {}}
+            "key_env": ["RIPPLE_RUNTIME_KEY"], "extra": {}, "prefill": True}
 
 
 def parse_options(body: dict) -> dict:
@@ -199,11 +200,50 @@ def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPRes
         raise UpstreamError(502, f"cannot reach {preset['base_url']}: {reason}") from exc
 
 
+def stream_once(preset: dict, messages: list[dict], max_tokens: int, overrides: dict | None = None,
+                prefill: str | None = None, stop: list[str] | None = None) -> HTTPResponse:
+    """One streamed answer with no tools, for inline edit. Returns the upstream SSE response."""
+    payload = {"max_tokens": max_tokens, "temperature": 0.0, **(overrides or {}),
+               "model": preset["model"], "messages": messages, "stream": True,
+               "stream_options": {"include_usage": True}}
+    if prefill is not None and can_prefill(preset):
+        payload["messages"] = [*messages, {"role": "assistant", "content": prefill}]
+        payload.update(add_generation_prompt=False, continue_final_message=True)
+        if stop:
+            payload["stop"] = stop
+    return _post(preset, payload, "text/event-stream", UPSTREAM_TIMEOUT_S)
+
+
+def content_events(text: str, pieces: int = 12) -> Iterator[bytes]:
+    """A fixed text as chat-completion stream events (for the mock)."""
+    step = max(1, len(text) // pieces)
+    for start in range(0, len(text), step):
+        yield _chunk({"content": text[start:start + step]})
+    yield _chunk(usage={"prompt_tokens": 0, "completion_tokens": max(1, len(text) // 4), "total_tokens": 0})
+    yield _sse("[DONE]")
+
+
+def can_prefill(preset: dict) -> bool:
+    """True for servers that can continue a final assistant message (vLLM, SGLang)."""
+    return bool(preset.get("prefill"))
+
+
 def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperature: float,
-                  overrides: dict | None = None) -> str:
-    """One short non-streamed answer, for inline completion."""
+                  overrides: dict | None = None, prefill: str | None = None, stop: list[str] | None = None,
+                  pattern: str | None = None) -> str:
+    """One short non-streamed answer, for inline completion.
+
+    With `prefill`, the assistant turn is started for the model and it continues from there.
+    """
     payload = {"max_tokens": max_tokens, "temperature": temperature, **(overrides or {}),
                "model": preset["model"], "messages": messages, "stream": False}
+    if prefill is not None:
+        payload["messages"] = [*messages, {"role": "assistant", "content": prefill}]
+        payload.update(add_generation_prompt=False, continue_final_message=True)
+        if stop:
+            payload["stop"] = stop
+        if pattern:
+            payload["structured_outputs"] = {"regex": pattern}
     try:
         with _post(preset, payload, "application/json", COMPLETE_TIMEOUT_S) as response:
             data = json.load(response)

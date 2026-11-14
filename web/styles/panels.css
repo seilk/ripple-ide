@@ -106,6 +106,8 @@
 .lab-body .quiet { height: var(--row-h); }
 .lab-body .quiet:disabled { color: var(--text-3); cursor: not-allowed; }
 .lab-error { color: var(--negative); min-height: 16px; }
+.lab-check { display: flex; align-items: center; gap: var(--space-2); }
+.lab-body .lab-check input { width: 16px; height: 16px; padding: 0; accent-color: var(--text); }
 
 .bench-panel { overflow: auto; padding: var(--space-4) var(--space-6) var(--space-8); }
 .bench-panel[hidden] { display: none; }

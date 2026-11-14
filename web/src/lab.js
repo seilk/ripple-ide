@@ -9,12 +9,13 @@ const MAX_SAMPLES = 200;
 
 /** Settings of one profile. An empty chat value means "leave it to the server". */
 const FIELDS = [
-  { section: 'Inline suggestions', key: 'debounce', label: 'Pause before asking', unit: 'ms', min: 0, max: 2000, step: 10, value: 220 },
+  { section: 'Inline suggestions', key: 'debounce', label: 'Pause before asking', unit: 'ms', min: 0, max: 2000, step: 5, value: 75 },
   { key: 'prefix', label: 'Context before the cursor', unit: 'chars', min: 200, max: 40000, step: 100, value: 6000 },
   { key: 'suffix', label: 'Context after the cursor', unit: 'chars', min: 0, max: 16000, step: 100, value: 1500 },
   { key: 'tokens', label: 'Max tokens', min: 1, max: 1024, step: 1, value: 192 },
   { key: 'lines', label: 'Max lines shown', min: 1, max: 40, step: 1, value: 10 },
-  { key: 'temperature', label: 'Temperature', min: 0, max: 2, step: 0.05, value: 0.2 },
+  { key: 'temperature', label: 'Temperature', min: 0, max: 2, step: 0.05, value: 0 },
+  { key: 'reason', label: 'Let Ripple reason before a suggestion (slow)', type: 'bool', value: false },
   { key: 'instruction', label: 'Extra instruction', type: 'text', value: '' },
   { section: 'Chat', key: 'chatTemperature', label: 'Temperature', min: 0, max: 2, step: 0.05, value: '' },
   { key: 'chatTopP', label: 'Top p', min: 0, max: 1, step: 0.05, value: '' },
@@ -87,7 +88,7 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
       return {
         prefix_chars: number(v.prefix), suffix_chars: number(v.suffix), max_lines: number(v.lines),
         max_tokens: number(v.tokens), temperature: number(v.temperature),
-        system_extra: v.instruction || undefined, extra_body: parseExtraBody(v.extraBody).value,
+        system_extra: v.instruction || undefined, reason: v.reason === true, extra_body: parseExtraBody(v.extraBody).value,
       };
     },
     chatOptions() {
@@ -145,6 +146,11 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
   function fieldRow(field, profile) {
     const id = `lab-${field.key}`;
     const set = (value) => { profile.values = { ...profile.values, [field.key]: value }; save(); };
+    if (field.type === 'bool') {
+      return h('label', { class: 'lab-field lab-wide lab-check', for: id },
+        h('input', { id, type: 'checkbox', checked: profile.values[field.key] === true, onchange: (event) => set(event.target.checked) }),
+        h('span', {}, field.label));
+    }
     if (field.type === 'text' || field.type === 'json') {
       const note = h('span', { class: 'lab-error' }, field.type === 'json' ? parseExtraBody(profile.values[field.key]).error : '');
       return h('label', { class: 'lab-field lab-wide', for: id }, h('span', {}, field.label),
@@ -235,7 +241,7 @@ export function createLab({ pane, benchPanel, select, presets, defaultPreset, cu
     benchPanel.replaceChildren(
       h('div', { class: 'bench-bar' },
         h('button', { id: 'bench-run', class: 'button', type: 'button', onclick: () => (benching ? benching.abort() : bench()) }, benching ? 'Stop' : 'Run benchmark'),
-        h('span', { id: 'bench-progress', class: 'mono' }, progress || (runs.length ? `Changes are against the ${new Date(baselineAt).toLocaleTimeString([], { hour12: false })} run` : '12 suggestion cases and 2 chat prompts, one request at a time'))),
+        h('span', { id: 'bench-progress', class: 'mono' }, progress || (runs.length ? `Changes are against the ${new Date(baselineAt).toLocaleTimeString([], { hour12: false })} run` : '14 suggestion cases and 2 chat prompts, one request at a time'))),
       runs.length ? h('table', { class: 'bench-table' },
         h('thead', {}, h('tr', {}, ['Profile', 'Suggestions passed', 'Median', '95th', 'First token', 'Tokens/s', 'Errors', ''].map((title) => h('th', {}, title)))),
         h('tbody', {}, runs.map((run) => {

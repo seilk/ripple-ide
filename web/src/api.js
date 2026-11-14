@@ -40,6 +40,9 @@ export const api = {
 /** Stream one chat completion. */
 export const streamChat = (payload, onEvent, signal) => streamEvents('/api/chat', payload, onEvent, signal);
 
+/** Stream the new text for a selected part of a file. */
+export const streamEdit = (payload, onEvent, signal) => streamEvents('/api/edit', payload, onEvent, signal);
+
 /** Run one workspace file and stream its output. */
 export const streamRun = (path, onEvent, signal) => streamEvents('/api/run', { path }, onEvent, signal);
 

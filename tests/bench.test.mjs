@@ -37,6 +37,7 @@ test('every completion case has a valid pattern that an obvious good answer pass
     'py-list-comp': 'i ** 2 for i in range(n)]', 'js-console': 'log(total);', 'js-for-of': 'item of items) {',
     'js-arrow-map': 'user.name', 'cuda-global-index': 'blockIdx.x * blockDim.x + threadIdx.x;', 'cuda-float-suffix': 'f;',
     'cuda-syncthreads': 'threads();', 'triton-arange': 'tl.arange(0, BLOCK)', 'ptx-load-global': 'global.f32 \t%f1, [%rd1];',
+    'py-body-fib': 'if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)', 'cuda-bounds-guard': 'if (i < n) y[i] *= a;',
   };
   assert.equal(new Set(COMPLETION_CASES.map((c) => c.id)).size, COMPLETION_CASES.length);
   for (const item of COMPLETION_CASES) {
@@ -49,4 +50,13 @@ test('fuzzy score ranks closer matches first and rejects non-matches', () => {
   assert.equal(fuzzyScore('xyz', 'mode: kernel'), -1);
   assert.ok(fuzzyScore('kern', 'mode: kernel') >= 0);
   assert.ok(fuzzyScore('mode', 'mode: kernel') < fuzzyScore('mode', 'toggle live compile mode'));
+});
+
+test('stripFence leaves code only, also while the answer is still streaming', async () => {
+  const { stripFence } = await import('../web/src/inline-edit.js');
+  assert.equal(stripFence('x = 1\n'), 'x = 1');
+  assert.equal(stripFence('```python\nx = 1\ny = 2\n```\n'), 'x = 1\ny = 2');
+  assert.equal(stripFence('```py'), '');
+  assert.equal(stripFence('```python\nx = '), 'x = ');
+  assert.equal(stripFence('  a\n  b'), '  a\n  b');
 });

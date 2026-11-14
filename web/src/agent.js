@@ -70,8 +70,25 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'edit_file',
+      description: 'Replace one exact piece of text in a workspace file. old_text must occur exactly once; include '
+        + 'enough lines to make it unique. The user sees a diff and can reject it. Prefer this over write_file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Workspace-relative path' },
+          old_text: { type: 'string', description: 'Exact text to replace, copied from the file' },
+          new_text: { type: 'string', description: 'Text that takes its place' },
+        },
+        required: ['path', 'old_text', 'new_text'], additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'write_file',
-      description: 'Replace the full content of one workspace file. The user sees a diff and can reject it.',
+      description: 'Create a file, or replace the full content of one. The user sees a diff and can reject it. For a change to an existing file use edit_file.',
       parameters: {
         type: 'object',
         properties: {
@@ -155,7 +172,7 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
     const think = h('details', { class: 'think', hidden: true }, h('summary', {}, 'Reasoning'), thinkText);
     block.append(think, say);
 
-    const message = { content: '', toolCalls: /** @type {any[]} */ ([]) };
+    const message = { content: '', reasoning: '', toolCalls: /** @type {any[]} */ ([]) };
     const started = performance.now();
     let firstAt = 0;
     let chunks = 0;
@@ -169,7 +186,7 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
         if (!delta) return;
         const reasoning = delta.reasoning ?? delta.reasoning_content;
         if (reasoning || delta.content || delta.tool_calls) { firstAt = firstAt || performance.now(); chunks += 1; }
-        if (reasoning) { think.hidden = false; thinkText.append(reasoning); }
+        if (reasoning) { message.reasoning += reasoning; think.hidden = false; thinkText.append(reasoning); }
         if (delta.content) { message.content += delta.content; say.append(delta.content); }
         for (const part of delta.tool_calls || []) {
           const slot = (message.toolCalls[part.index ?? 0] ||= { id: '', type: 'function', function: { name: '', arguments: '' } });
@@ -193,9 +210,12 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
     if (!message.content) say.remove();
 
     const calls = message.toolCalls.filter(Boolean);
+    // Ripple's chat template puts reasoning_content back in front of the answer, so a
+    // tool-call chain keeps the reasoning that led to each call.
+    const reasoning = message.reasoning ? { reasoning_content: message.reasoning } : {};
     return calls.length
-      ? { role: 'assistant', content: message.content || null, tool_calls: calls }
-      : { role: 'assistant', content: message.content };
+      ? { role: 'assistant', content: message.content || null, ...reasoning, tool_calls: calls }
+      : { role: 'assistant', content: message.content, ...reasoning };
   }
 
   async function send(text) {

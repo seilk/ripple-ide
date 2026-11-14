@@ -20,7 +20,7 @@ export const COMPLETION_CASES = [
     prefix: 'const names = users.map((user) => ', suffix: ');\n', accept: 'user\\.\\w+' },
   { id: 'cuda-global-index', language: 'cuda', path: 'saxpy.cu',
     prefix: '__global__ void saxpy(float a, const float* x, float* y, int n) {\n  int i = ', suffix: '\n  if (i < n) y[i] = a * x[i] + y[i];\n}\n',
-    accept: 'blockIdx\\.x\\s*\\*\\s*blockDim\\.x\\s*\\+\\s*threadIdx\\.x' },
+    accept: 'blockIdx\\.x\\s*\\*\\s*blockDim\\.x\\s*\\+\\s*threadIdx\\.x|threadIdx\\.x\\s*\\+\\s*blockIdx\\.x\\s*\\*\\s*blockDim\\.x' },
   { id: 'cuda-float-suffix', language: 'cuda', path: 'scale.cu',
     prefix: '__global__ void scale(float* y, int n) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  if (i < n) y[i] = y[i] * 0.5', suffix: '\n}\n', accept: '^f' },
   { id: 'cuda-syncthreads', language: 'cuda', path: 'reduce.cu',
@@ -29,6 +29,13 @@ export const COMPLETION_CASES = [
     prefix: '@triton.jit\ndef kernel(x_ptr, n, BLOCK: tl.constexpr):\n    offsets = ', suffix: '\n    mask = offsets < n\n', accept: 'tl\\.arange\\(0,\\s*BLOCK\\)' },
   { id: 'ptx-load-global', language: 'ptx', path: 'k.ptx',
     prefix: '\tcvta.to.global.u64 \t%rd1, %rd0;\n\tld.', suffix: '\n\tret;\n', accept: '^global\\.' },
+  // The cursor is at the start of a line: the suggestion may span lines.
+  { id: 'py-body-fib', language: 'python', path: 'fib.py',
+    prefix: 'def fib(n):\n    """Return the n-th Fibonacci number."""\n    ', suffix: '\n\nprint(fib(10))\n',
+    accept: 'fib\\(n\\s*-\\s*1\\)|a,\\s*b\\s*=\\s*b,\\s*a\\s*\\+\\s*b' },
+  { id: 'cuda-bounds-guard', language: 'cuda', path: 'scale.cu',
+    prefix: '__global__ void scale(float* y, float a, int n) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  ', suffix: '\n}\n',
+    accept: 'if\\s*\\(i\\s*<\\s*n\\)' },
 ];
 
 /** Short prompts for streaming speed: time to first token and tokens per second. */
