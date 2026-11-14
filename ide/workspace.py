@@ -1,4 +1,4 @@
-"""Workspace: the folder of kernel files the IDE may read and write."""
+"""Workspace: the project folder the IDE may read and write."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from pathlib import Path
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_FILES = 2000
+MAX_SEARCH_HITS = 200
+MAX_SEARCH_LINE_CHARS = 240
 SKIP_DIRS = frozenset({"__pycache__", "node_modules", "build", "dist"})
 
 
@@ -53,6 +55,30 @@ class Workspace:
             return full.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             raise WorkspaceError(f"not a UTF-8 text file: {rel}") from None
+
+    def delete(self, rel: str) -> None:
+        full = self.resolve(rel)
+        if not full.is_file():
+            raise WorkspaceError(f"no such file: {rel}")
+        full.unlink()
+
+    def search(self, query: str) -> list[dict]:
+        """Plain-text, case-insensitive search over the listed files."""
+        needle = query.lower()
+        if len(needle) < 2:
+            raise WorkspaceError("search text must be at least 2 characters")
+        hits: list[dict] = []
+        for entry in self.list():
+            try:
+                text = (self.root / entry["path"]).read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for number, line in enumerate(text.splitlines(), start=1):
+                if needle in line.lower():
+                    hits.append({"path": entry["path"], "line": number, "text": line.strip()[:MAX_SEARCH_LINE_CHARS]})
+                    if len(hits) >= MAX_SEARCH_HITS:
+                        return hits
+        return hits
 
     def write(self, rel: str, content: str) -> int:
         if not isinstance(content, str):

@@ -1,54 +1,95 @@
-// Ripple Kernel IDE: wires the workspace, the editors, the compile action,
-// the kernel report and the Ripple panel together.
+// Ripple IDE: a general editor with Ripple as the agent. Kernel files (CUDA,
+// Triton, PTX) also get the PTX pane, live compile and the kernel report.
 
 import { createAgent } from './agent.js';
-import { api } from './api.js';
+import { api, streamRun } from './api.js';
+import { snapshot } from './baseline.js';
+import { registerInlineSuggestions } from './complete.js';
 import { createDiffEditor, createEditor, languageFor, loadMonaco } from './editor.js';
+import { registerQuickFixes } from './fixes.js';
+import { registerKernelLanguages } from './kernel-lang.js';
 import { createLinker } from './link.js';
-import { analyzePtx, summarize } from './ptx-analyze.js';
+import { createPalette } from './palette.js';
+import { analyzePtx, basename } from './ptx-analyze.js';
 import { renderReport } from './report.js';
-import { $, debounce, errorText, h, kindOf, prefs } from './ui.js';
+import { setupDividers } from './resize.js';
+import { createRippleTools, systemPrompt } from './ripple-tools.js';
+import { createTree } from './tree.js';
+import { $, debounce, errorText, extOf, h, kernelKind, prefs } from './ui.js';
 
 const LIVE_ANALYSIS_MS = 250;
-const MAX_DIAGNOSTICS_FOR_MODEL = 20;
-const COMPILE_LABEL = { cuda: 'Compile to PTX', ptx: 'Check PTX', triton: 'Run for PTX', text: 'Compile to PTX' };
-const EXT_LABEL = { cuda: 'cu', ptx: 'ptx', triton: 'py', text: '' };
+const LIVE_COMPILE_MS = 600;
+const MAX_FINDINGS_FOR_SUGGESTIONS = 8;
+const MAX_OUTPUT_CHARS = 200_000;
+const COMPILE_LABEL = { cuda: 'Compile to PTX', ptx: 'Check PTX', triton: 'Run for PTX' };
+const PREF_KEY = { live: 'live', suggest: 'suggest', showDebugLines: 'debug-lines' };
+const DEBUG_LINE_RE = /^\s*(?:\.loc\b|\$L__(?:tmp|func_begin|func_end)\d+:)/; // line info, not instructions
+const QUICK_PROMPTS = {
+  kernel: ['Why is this kernel slow', 'Explain the hot loop', 'Add a header comment'],
+  general: ['Explain this file', 'Find bugs in this file', 'Add a header comment'],
+};
 
 const state = {
   /** @type {Array<{path: string, size: number}>} */ files: [],
   /** @type {Map<string, {model: any, savedVersion: number}>} */ open: new Map(),
   /** @type {string|null} */ active: null,
-  /** @type {Map<string, {res: any, analysis: any}>} */ results: new Map(),
+  /** @type {Map<string, {res: any, analysis: any, ptx: string, stale: boolean}>} */ results: new Map(),
+  /** @type {Map<string, {at: Date, fns: Record<string, any>}>} */ baselines: new Map(),
+  /** @type {Map<string, number>} */ compileSeq: new Map(),
   /** @type {any} */ toolchain: null,
+  run: { enabled: false, /** @type {string[]} */ extensions: [] },
+  /** @type {AbortController|null} */ running: null,
+  live: prefs.get('live', 'on') === 'on',
+  suggest: prefs.get('suggest', 'on') === 'on',
+  showDebugLines: prefs.get('debug-lines', 'off') === 'on',
 };
 
 const els = {
   toolchain: $('toolchain'), arch: /** @type {HTMLSelectElement} */ ($('arch')),
-  flags: /** @type {HTMLInputElement} */ ($('flags')), compile: /** @type {HTMLButtonElement} */ ($('compile')),
-  compileLabel: $('compile-label'), preset: /** @type {HTMLSelectElement} */ ($('preset')),
-  root: $('root'), fileList: $('file-list'), tabs: $('tabs'), split: $('split'),
-  ptxMeta: $('ptx-meta'), ptxEmpty: $('ptx-empty'), report: $('report'), log: $('log'),
-  tabReport: $('tab-report'), tabLog: $('tab-log'), status: $('status'),
+  flags: /** @type {HTMLInputElement} */ ($('flags')), primary: /** @type {HTMLButtonElement} */ ($('primary')),
+  primaryLabel: $('primary-label'), preset: /** @type {HTMLSelectElement} */ ($('preset')),
+  root: $('root'), outline: $('outline'), outlineTitle: $('outline-title'),
+  newFile: $('new-file'), newFileForm: /** @type {HTMLFormElement} */ ($('new-file-form')),
+  newFilePath: /** @type {HTMLInputElement} */ ($('new-file-path')),
+  tabs: $('tabs'), split: $('split'), welcome: $('welcome'),
+  ptxMeta: $('ptx-meta'), ptxEmpty: $('ptx-empty'),
+  output: $('output'), report: $('report'), log: $('log'),
+  tabOutput: $('tab-output'), tabReport: $('tab-report'), tabLog: $('tab-log'), status: $('status'),
+  toggleLive: $('toggle-live'), toggleSuggest: $('toggle-suggest'), toggleDebug: $('toggle-debug'),
+  suggestState: $('suggest-state'), cursor: $('cursor'), language: $('language'),
   diffDialog: /** @type {HTMLDialogElement} */ ($('diff-dialog')), diffPath: $('diff-path'),
+  confirmDialog: /** @type {HTMLDialogElement} */ ($('confirm-dialog')),
 };
 
-let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor;
+let monaco; let srcEditor; let ptxEditor; let ptxModel; let linker; let diffEditor; let agent; let tree; let palette;
 
 function setStatus(text, kind = '') {
   els.status.textContent = text;
   els.status.dataset.kind = kind;
 }
 
-// ------------------------------------------------------------------ workspace
+/** Kernel kind of a file ('cuda', 'ptx', 'triton') or null for an ordinary file. */
+function kindOf(path) {
+  return kernelKind(path, state.open.get(path)?.model.getValue() ?? '');
+}
 
-function renderFiles() {
-  els.fileList.replaceChildren(...state.files.map((file) => {
-    const kind = kindOf(file.path);
+const canRun = (path) => state.run.enabled && state.run.extensions.includes(`.${extOf(path)}`);
+
+// ------------------------------------------------------------------ files
+
+/** Kernels of the active file, from the last analysis. */
+function renderOutline(analysis, sourceName) {
+  const functions = analysis?.functions || [];
+  els.outlineTitle.hidden = functions.length === 0;
+  els.outline.replaceChildren(...functions.map((fn) => {
+    const findings = analysis.lints.filter((lint) => lint.fn === fn.name).length;
+    const first = analysis.lineMap.find((entry) => entry.ptxLine >= fn.startLine && entry.ptxLine <= fn.endLine
+      && basename(entry.file) === basename(sourceName));
     return h('li', {}, h('button', {
-      class: 'file', type: 'button', title: file.path, 'aria-current': file.path === state.active ? 'true' : null,
-      onclick: () => openFile(file.path).catch((error) => setStatus(errorText(error), 'error')),
-    }, h('span', { class: 'ext' }, EXT_LABEL[kind]),
-    h('span', { class: 'name' }, file.path)));
+      class: 'file kernel', type: 'button', title: `${fn.name}: ${fn.instructions} instructions, ${findings} findings`,
+      onclick: () => jump({ ptxLine: fn.startLine, srcLine: first?.srcLine ?? null, focusSource: Boolean(first) }),
+    }, h('span', { class: 'ext' }, fn.kind === 'entry' ? 'krn' : 'fn'), h('span', { class: 'name' }, fn.pretty),
+    h('span', { class: 'count' }, findings || '')));
   }));
 }
 
@@ -68,8 +109,10 @@ function renderTabs() {
 async function refreshFiles() {
   const listing = await api.files();
   state.files = listing.files;
+  state.run = listing.run;
   els.root.textContent = listing.root;
-  renderFiles();
+  tree.render(state.files);
+  return state.files;
 }
 
 async function ensureOpen(path) {
@@ -78,40 +121,85 @@ async function ensureOpen(path) {
   const file = await api.read(path);
   const model = monaco.editor.createModel(file.content, languageFor(path), monaco.Uri.parse(`file:///${path}`));
   const entry = { model, savedVersion: model.getAlternativeVersionId() };
-  model.onDidChangeContent(() => { renderTabs(); if (path === state.active && kindOf(path) === 'ptx') livePtx(); });
+  model.onDidChangeContent(() => {
+    renderTabs();
+    const kind = kindOf(path);
+    if (kind === 'ptx' && path === state.active) livePtx();
+    if (kind === 'cuda') liveCompile(path);
+  });
   state.open.set(path, entry);
   return entry;
 }
 
-async function openFile(path) {
+async function openFile(path, line) {
   await ensureOpen(path);
   setActive(path);
+  if (line) { srcEditor.revealLineInCenter(line); srcEditor.setPosition({ lineNumber: line, column: 1 }); }
 }
 
-function closeFile(path) {
+function closeFile(path, { force = false } = {}) {
   const entry = state.open.get(path);
   if (!entry) return;
-  if (isDirty(path) && !window.confirm(`${path} has unsaved changes. Close it anyway?`)) return;
+  if (!force && isDirty(path) && !window.confirm(`${path} has unsaved changes. Close it anyway?`)) return;
   state.open.delete(path);
   state.results.delete(path);
+  state.baselines.delete(path);
   if (state.active === path) {
     const next = [...state.open.keys()].pop() || null;
-    if (next) setActive(next); else { state.active = null; srcEditor.setModel(null); linker.clear(); renderTabs(); renderFiles(); showResult(); }
+    if (next) setActive(next); else clearActive();
   } else renderTabs();
   entry.model.dispose();
 }
 
-async function saveActive() {
-  const path = state.active;
-  const entry = path && state.open.get(path);
-  if (!entry) return;
+function clearActive() {
+  state.active = null;
+  srcEditor.setModel(null);
+  linker.clear();
+  els.welcome.hidden = false;
+  els.language.textContent = '';
+  document.body.removeAttribute('data-kernel');
+  renderTabs();
+  tree.refresh();
+  updatePrimary();
+  showResult();
+}
+
+async function save(path) {
+  const entry = state.open.get(path);
+  if (!entry) return false;
   try {
     await api.write(path, entry.model.getValue());
     entry.savedVersion = entry.model.getAlternativeVersionId();
     renderTabs();
-    setStatus(`Saved ${path}`, 'ok');
+    return true;
   } catch (error) {
     setStatus(`Save failed: ${errorText(error)}`, 'error');
+    return false;
+  }
+}
+
+async function saveActive() {
+  if (state.active && await save(state.active)) setStatus(`Saved ${state.active}`, 'ok');
+}
+
+async function createFile(path) {
+  const clean = path.trim().replace(/^\/+/, '');
+  if (!clean) return;
+  if (state.files.some((file) => file.path === clean)) { await openFile(clean); return; }
+  await api.write(clean, '');
+  await refreshFiles();
+  await openFile(clean);
+}
+
+async function deleteFile(path) {
+  if (!window.confirm(`Delete ${path}? This cannot be undone.`)) return;
+  try {
+    await api.remove(path);
+    closeFile(path, { force: true });
+    await refreshFiles();
+    setStatus(`Deleted ${path}`, 'ok');
+  } catch (error) {
+    setStatus(errorText(error), 'error');
   }
 }
 
@@ -119,28 +207,96 @@ function setActive(path) {
   state.active = path;
   setStatus('');
   linker.clear();
-  srcEditor.setModel(state.open.get(path).model);
+  const model = state.open.get(path).model;
+  srcEditor.setModel(model);
+  els.welcome.hidden = true;
   prefs.set('active', path);
+  const kind = kindOf(path);
+  document.body.toggleAttribute('data-kernel', Boolean(kind));
+  const language = monaco.languages.getLanguages().find((item) => item.id === model.getLanguageId());
+  els.language.textContent = kind === 'triton' ? 'Triton' : language?.aliases?.[0] || model.getLanguageId();
+  agent.setQuick(kind ? QUICK_PROMPTS.kernel : QUICK_PROMPTS.general);
   renderTabs();
-  renderFiles();
-  updateCompileButton();
+  tree.refresh();
+  updatePrimary();
   showResult();
+  selectDock(kind ? 'report' : 'output');
   srcEditor.focus();
+  if (kind === 'cuda' && !state.results.has(path)) liveCompile(path); // show PTX as soon as a kernel opens
 }
 
-// ------------------------------------------------------------------ results
+// ------------------------------------------------------------------ primary action: run or compile
 
-function updateCompileButton() {
-  const kind = state.active ? kindOf(state.active) : 'text';
+/** What the main button does for the active file. */
+function primaryAction() {
+  const path = state.active;
+  if (state.running) return { type: 'stop', label: 'Stop', reason: '' };
+  if (!path) return { type: 'none', label: 'Run', reason: 'Open a file first' };
+  const kind = kindOf(path);
   const tc = state.toolchain;
-  els.compileLabel.textContent = COMPILE_LABEL[kind];
-  let reason = '';
-  if (!state.active || kind === 'text') reason = 'Open a .cu, .ptx or Triton .py file';
-  else if (kind === 'cuda' && tc && !tc.cuda_frontend) reason = 'No nvcc and no clang with the NVPTX target on the runner';
-  else if (kind === 'triton' && tc && !tc.triton) reason = 'Triton is not installed on the runner';
-  els.compile.disabled = Boolean(reason);
-  els.compile.title = reason || 'Compile the active file (Cmd/Ctrl+Enter)';
+  if (kind === 'cuda' && tc && !tc.cuda_frontend) return { type: 'none', label: COMPILE_LABEL.cuda, reason: 'No nvcc and no clang with the NVPTX target on the runner' };
+  if (kind === 'triton' && tc && !tc.triton) {
+    return canRun(path) ? { type: 'run', label: 'Run', reason: '' }
+      : { type: 'none', label: COMPILE_LABEL.triton, reason: 'Triton is not installed on the runner' };
+  }
+  if (kind) return { type: 'compile', label: COMPILE_LABEL[kind], reason: '' };
+  if (canRun(path)) return { type: 'run', label: 'Run', reason: '' };
+  return {
+    type: 'none', label: 'Run',
+    reason: state.run.enabled ? `No interpreter for .${extOf(path)} files` : 'Running files is off on this server (--allow-run)',
+  };
 }
+
+function updatePrimary() {
+  const action = primaryAction();
+  els.primaryLabel.textContent = action.label;
+  els.primary.disabled = action.type === 'none';
+  els.primary.title = action.reason || `${action.label} (Cmd/Ctrl+Enter)`;
+}
+
+function doPrimary() {
+  const action = primaryAction();
+  if (action.type === 'stop') state.running.abort();
+  else if (action.type === 'compile') compileActive();
+  else if (action.type === 'run') runFile(state.active).catch((error) => setStatus(errorText(error), 'error'));
+}
+
+function appendOutput(text, meta = null) {
+  const node = meta ? h('span', { class: 'run-meta', 'data-failed': meta === 'failed' }, text) : document.createTextNode(text);
+  els.output.append(node);
+  if (els.output.textContent.length > MAX_OUTPUT_CHARS) els.output.firstChild?.remove();
+  els.output.scrollTop = els.output.scrollHeight;
+}
+
+/** Save the file, run it on the server and stream its output to the Output tab. */
+async function runFile(path) {
+  if (state.running) throw new Error('Another run is in progress');
+  await ensureOpen(path);
+  if (isDirty(path) && !(await save(path))) throw new Error('Could not save before the run');
+  selectDock('output');
+  els.output.replaceChildren();
+  state.running = new AbortController();
+  updatePrimary();
+  setStatus(`Running ${path}`);
+  let output = '';
+  let exit = { code: -1, seconds: 0, note: 'stopped', command: path };
+  try {
+    await streamRun(path, (event) => {
+      if (event.type === 'out') { output += event.text; appendOutput(event.text); }
+      if (event.type === 'exit') exit = event;
+    }, state.running.signal);
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === 'AbortError')) { state.running = null; updatePrimary(); throw error; }
+  }
+  state.running = null;
+  updatePrimary();
+  const failed = exit.code !== 0;
+  appendOutput(`\n${exit.command}: exit ${exit.code} in ${exit.seconds.toFixed(2)} s${exit.note ? ` (${exit.note})` : ''}\n`, failed ? 'failed' : 'ok');
+  setStatus(failed ? `Exit ${exit.code}` : `Ran in ${exit.seconds.toFixed(2)} s`, failed ? 'error' : 'ok');
+  return { code: exit.code, output, seconds: exit.seconds };
+}
+
+// ------------------------------------------------------------------ kernel results
 
 function showLog(res) {
   els.log.textContent = res
@@ -149,7 +305,7 @@ function showLog(res) {
     : '';
 }
 
-function jump({ ptxLine, srcLine }) {
+function jump({ ptxLine, srcLine, focusSource = false }) {
   const ptxInSource = state.active && kindOf(state.active) === 'ptx';
   if (ptxLine && ptxInSource) {
     srcEditor.revealLineInCenter(ptxLine);
@@ -165,78 +321,132 @@ function jump({ ptxLine, srcLine }) {
   const line = srcLine ?? (ptxLine ? linker.sourceLineOf(ptxLine) : null);
   if (line) {
     srcEditor.revealLineInCenter(line);
-    if (!ptxLine) { srcEditor.setPosition({ lineNumber: line, column: 1 }); srcEditor.focus(); }
+    if (!ptxLine || focusSource) { srcEditor.setPosition({ lineNumber: line, column: 1 }); srcEditor.focus(); }
   }
 }
 
-/** Show whatever is known about the active file: compile result, live PTX analysis or the empty state. */
+/** Fold the line-info lines away, so the listing shows instructions. Line numbers stay true. */
+function applyDebugLineFilter() {
+  if (typeof ptxEditor.setHiddenAreas !== 'function') return;
+  const ranges = [];
+  if (!state.showDebugLines) {
+    const count = ptxModel.getLineCount();
+    for (let line = 1; line <= count; line += 1) {
+      if (!DEBUG_LINE_RE.test(ptxModel.getLineContent(line))) continue;
+      const last = ranges[ranges.length - 1];
+      if (last && last.end === line - 1) last.end = line;
+      else ranges.push({ start: line, end: line });
+    }
+  }
+  ptxEditor.setHiddenAreas(ranges.map((r) => new monaco.Range(r.start, 1, r.end, 1)));
+}
+
+function setBaseline(path) {
+  const stored = state.results.get(path);
+  if (!stored?.analysis || stored.stale) return;
+  state.baselines.set(path, { at: new Date(), fns: snapshot(stored.analysis, stored.res.ptxas.functions) });
+}
+
+/** Show what is known about the active file. Ordinary files have no PTX pane and no report. */
 function showResult() {
   const path = state.active;
-  const kind = path ? kindOf(path) : 'text';
+  const kind = path ? kindOf(path) : null;
   const stored = path ? state.results.get(path) : null;
-  els.split.toggleAttribute('data-single', kind === 'ptx' || kind === 'text');
+  const res = stored?.res ?? null;
+  els.split.toggleAttribute('data-single', kind === null || kind === 'ptx');
+  const report = (analysis) => renderReport(els.report, {
+    analysis, res, sourceName: path || '', onJump: jump, stale: stored?.stale ?? false,
+    baseline: path && kind !== 'ptx' ? state.baselines.get(path) ?? null : null,
+    onSetBaseline: () => { setBaseline(path); showResult(); },
+  });
 
+  if (kind === null) { renderOutline(null, ''); report(null); showLog(null); return; }
   if (kind === 'ptx') {
     const analysis = analyzePtx(state.open.get(path).model.getValue());
     linker.decorateSourceAsPtx(analysis);
-    renderReport(els.report, { analysis, res: stored?.res ?? null, sourceName: path, onJump: jump });
-    showLog(stored?.res ?? null);
+    renderOutline(analysis, path);
+    report(analysis);
+    showLog(res);
     return;
   }
-  const ptx = stored?.res?.ptx || '';
-  ptxModel.setValue(ptx);
+  const ptx = stored?.ptx || '';
+  if (ptxModel.getValue() !== ptx) ptxModel.setValue(ptx);
+  applyDebugLineFilter();
   els.ptxEmpty.hidden = Boolean(ptx);
+  const instructions = stored?.analysis ? stored.analysis.functions.reduce((n, fn) => n + fn.instructions, 0) : 0;
   els.ptxMeta.textContent = stored?.analysis
-    ? `${stored.analysis.target || ''}, ${ptx.split('\n').length} lines, ${stored.res.backend}` : '';
-  if (stored?.analysis) linker.linkCompiled(stored.analysis, path);
-  if (stored?.res) linker.showDiagnostics(stored.res.diagnostics, path);
-  renderReport(els.report, { analysis: stored?.analysis ?? null, res: stored?.res ?? null, sourceName: path || '', onJump: jump });
-  showLog(stored?.res ?? null);
+    ? `${stored.analysis.target || ''}, ${instructions} instructions, ${stored.stale ? 'last good compile' : res.backend}` : '';
+  if (stored?.analysis && !stored.stale) linker.linkCompiled(stored.analysis, path);
+  else linker.clear();
+  if (res) linker.showDiagnostics(res.diagnostics, path);
+  renderOutline(stored?.analysis ?? null, path);
+  report(stored?.analysis ?? null);
+  showLog(res);
 }
 
 const livePtx = debounce(() => { if (state.active && kindOf(state.active) === 'ptx') showResult(); }, LIVE_ANALYSIS_MS);
 
-// ------------------------------------------------------------------ compile
-
 async function compile(path, { allowRun = false } = {}) {
   const entry = await ensureOpen(path);
+  const seq = (state.compileSeq.get(path) || 0) + 1;
+  state.compileSeq.set(path, seq);
   const res = await api.compile({
     path, content: entry.model.getValue(), arch: els.arch.value, flags: els.flags.value.trim(), allow_run: allowRun,
   });
-  const text = kindOf(path) === 'ptx' ? entry.model.getValue() : res.ptx;
-  const analysis = text ? analyzePtx(text) : null;
-  state.results.set(path, { res, analysis });
+  const isPtx = kindOf(path) === 'ptx';
+  const text = isPtx ? entry.model.getValue() : res.ptx;
+  const previous = state.results.get(path);
+  const result = !isPtx && !res.ok && previous?.ptx
+    ? { res, analysis: previous.analysis, ptx: previous.ptx, stale: true } // keep the last good listing on screen
+    : { res, analysis: text ? analyzePtx(text) : null, ptx: text || '', stale: false };
+  if (state.compileSeq.get(path) !== seq) return result; // a newer compile of this file is on its way
+  state.results.set(path, result);
+  if (res.ok && result.analysis && !isPtx && !state.baselines.has(path)) setBaseline(path);
   if (path === state.active) showResult();
-  return { res, analysis };
+  return result;
+}
+
+function reportStatus(path, { res, analysis, stale }, prefix = '') {
+  if (path !== state.active) return;
+  if (!res.ok || stale) { setStatus(`${prefix}Compile failed`, 'error'); return; }
+  setStatus(`${prefix}${analysis ? analysis.lints.length : 0} findings, ${res.seconds.toFixed(2)} s`, 'ok');
 }
 
 async function compileActive() {
   const path = state.active;
-  if (!path || els.compile.disabled) return;
-  els.compile.disabled = true;
+  if (!path) return;
+  els.primary.disabled = true;
   setStatus(`Compiling ${path}`);
   try {
-    const { res, analysis } = await compile(path, { allowRun: true });
-    const findings = analysis ? analysis.lints.length : 0;
-    setStatus(res.ok ? `${findings} findings, ${res.seconds.toFixed(2)} s` : 'Compile failed',
-      res.ok ? 'ok' : 'error');
-    if (!res.ok && !res.diagnostics.length) selectDock('log');
+    const result = await compile(path, { allowRun: true });
+    reportStatus(path, result);
+    selectDock(!result.res.ok && !result.res.diagnostics.length ? 'log' : 'report');
   } catch (error) {
     setStatus(errorText(error), 'error');
   } finally {
-    updateCompileButton();
+    updatePrimary();
   }
 }
 
-function selectDock(which) {
-  const log = which === 'log';
-  els.tabReport.setAttribute('aria-selected', String(!log));
-  els.tabLog.setAttribute('aria-selected', String(log));
-  els.report.hidden = log;
-  els.log.hidden = !log;
+const liveTimers = new Map();
+/** Compile a CUDA file a moment after the last keystroke. */
+function liveCompile(path) {
+  clearTimeout(liveTimers.get(path));
+  if (!state.live || !state.toolchain?.cuda_frontend) return;
+  liveTimers.set(path, setTimeout(() => {
+    compile(path).then((result) => reportStatus(path, result, 'Live: '))
+      .catch((error) => setStatus(errorText(error), 'error'));
+  }, LIVE_COMPILE_MS));
 }
 
-// ------------------------------------------------------------------ toolchain and presets
+function selectDock(which) {
+  for (const [name, tab, panel] of [['output', els.tabOutput, els.output], ['report', els.tabReport, els.report], ['log', els.tabLog, els.log]]) {
+    tab.setAttribute('aria-selected', String(name === which));
+    panel.hidden = name !== which;
+  }
+}
+
+// ------------------------------------------------------------------ toolchain, presets, toggles
 
 async function refreshToolchain(refresh = false) {
   els.toolchain.textContent = 'Checking toolchain';
@@ -253,7 +463,7 @@ async function refreshToolchain(refresh = false) {
     els.toolchain.textContent = errorText(error);
     els.toolchain.dataset.state = 'none';
   }
-  updateCompileButton();
+  updatePrimary();
 }
 
 async function loadPresets() {
@@ -264,7 +474,27 @@ async function loadPresets() {
   els.preset.addEventListener('change', () => prefs.set('preset', els.preset.value));
 }
 
-// ------------------------------------------------------------------ Ripple tools
+/** @param {HTMLElement} button @param {'live'|'suggest'|'showDebugLines'} key @param {() => void} onChange */
+function bindToggle(button, key, onChange) {
+  const paint = () => button.setAttribute('aria-pressed', String(state[key]));
+  button.addEventListener('click', () => {
+    state[key] = !state[key];
+    prefs.set(PREF_KEY[key], state[key] ? 'on' : 'off');
+    paint();
+    onChange();
+  });
+  paint();
+}
+
+function showSuggestState({ phase, source, ms, message }) {
+  const from = source === 'ripple' ? `Ripple, ${ms} ms` : 'idioms';
+  els.suggestState.textContent = phase === 'asking' ? 'Suggesting'
+    : phase === 'shown' ? `Tab accepts (${from})`
+      : phase === 'error' ? `Suggestion failed: ${message}` : '';
+  els.suggestState.dataset.kind = phase === 'error' ? 'error' : '';
+}
+
+// ------------------------------------------------------------------ dialogs and Ripple
 
 function askForWrite(path, before, after) {
   return new Promise((resolve) => {
@@ -286,102 +516,186 @@ function askForWrite(path, before, after) {
   });
 }
 
-const rippleTools = {
-  list_files: async () => { await refreshFiles(); return state.files; },
-  read_file: async ({ path }) => (await ensureOpenForTool(path)).model.getValue(),
-  compile_kernel: async ({ path }) => {
-    if (kindOf(path) === 'triton') return { error: 'Triton files run Python on the runner. Ask the user to press Run.' };
-    const { res, analysis } = await compile(path);
-    return {
-      ok: res.ok, backend: res.backend, arch: res.arch, notes: res.notes,
-      diagnostics: res.diagnostics.slice(0, MAX_DIAGNOSTICS_FOR_MODEL),
-      ...(analysis ? summarize(analysis, path, res.ptxas.functions) : { functions: [], lints: [] }),
+function askConfirm(title, detail) {
+  return new Promise((resolve) => {
+    $('confirm-title').textContent = title;
+    $('confirm-detail').textContent = detail;
+    const finish = (answer) => {
+      els.confirmDialog.close();
+      $('confirm-yes').onclick = null; $('confirm-no').onclick = null; els.confirmDialog.oncancel = null;
+      resolve(answer);
     };
-  },
-  write_file: async ({ path, content }) => {
-    if (typeof content !== 'string') throw new Error('content must be a string');
-    const known = state.files.some((file) => file.path === path);
-    const before = known ? (await ensureOpenForTool(path)).model.getValue() : '';
-    if (!(await askForWrite(path, before, content))) return { rejected: true, message: 'The user rejected this change.' };
-    await api.write(path, content);
-    if (!known) await refreshFiles();
-    const entry = await ensureOpen(path);
-    if (entry.model.getValue() !== content) {
-      entry.model.pushEditOperations([], [{ range: entry.model.getFullModelRange(), text: content }], () => null);
-    }
-    entry.savedVersion = entry.model.getAlternativeVersionId();
-    state.results.delete(path);
-    setActive(path);
-    if (kindOf(path) === 'cuda') compile(path).catch((error) => setStatus(errorText(error), 'error')); // keep the report current
-    return { written: path, bytes: content.length };
-  },
-};
-
-async function ensureOpenForTool(path) {
-  if (typeof path !== 'string' || !path) throw new Error('path is required');
-  const entry = await ensureOpen(path);
-  renderTabs();
-  return entry;
+    $('confirm-yes').onclick = () => finish(true);
+    $('confirm-no').onclick = () => finish(false);
+    els.confirmDialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+    els.confirmDialog.showModal();
+  });
 }
 
-function systemPrompt() {
-  const tc = state.toolchain || {};
-  return [
-    'You are Ripple, working inside Ripple Kernel IDE, a workbench for CUDA, Triton and PTX GPU kernels.',
-    'Work like a kernel engineer: read the kernel, compile it, read the report, then act. After every edit, '
-      + 'compile again and compare the numbers. Do not claim a speedup that the report does not show.',
-    'The report counts instructions, loops, memory traffic by state space, double-precision ops, thread-local '
-      + 'memory and (with ptxas) physical registers and spills. It does not measure run time.',
-    'write_file replaces the whole file and the user reviews a diff. Keep edits small and explain each one in one line.',
-    `Active file: ${state.active || '(none)'}`,
-    `Toolchain: frontend=${tc.cuda_frontend || 'none'}, ptxas=${tc.ptxas ? 'yes' : 'no'}, arch=${els.arch.value}, runner=${tc.runner || 'local'}`,
-    tc.cuda_frontend === 'clang-nvptx' ? 'The PTX is a clang NVPTX preview, not nvcc output. Say so when it matters.' : '',
-  ].filter(Boolean).join('\n');
+async function applyWrite(path, content) {
+  const known = state.files.some((file) => file.path === path);
+  await api.write(path, content);
+  if (!known) await refreshFiles();
+  const entry = await ensureOpen(path);
+  if (entry.model.getValue() !== content) {
+    entry.model.pushEditOperations([], [{ range: entry.model.getFullModelRange(), text: content }], () => null);
+  }
+  entry.savedVersion = entry.model.getAlternativeVersionId();
+  setActive(path);
+  if (kindOf(path) === 'cuda' && !state.live) compile(path).catch((error) => setStatus(errorText(error), 'error'));
+}
+
+function askAboutSelection() {
+  const model = srcEditor.getModel();
+  const selection = srcEditor.getSelection();
+  if (!model || !selection || !state.active) return;
+  const range = selection.isEmpty()
+    ? new monaco.Range(selection.startLineNumber, 1, selection.startLineNumber, model.getLineMaxColumn(selection.startLineNumber))
+    : selection;
+  const lines = range.startLineNumber === range.endLineNumber ? `line ${range.startLineNumber}`
+    : `lines ${range.startLineNumber} to ${range.endLineNumber}`;
+  agent.prefill(`About ${lines} of ${state.active}:\n${model.getValueInRange(range).trim()}\n\n`);
 }
 
 // ------------------------------------------------------------------ boot
 
-async function boot() {
-  monaco = await loadMonaco();
+function setupEditors() {
   srcEditor = createEditor(monaco, $('src-editor'));
   ptxModel = monaco.editor.createModel('', 'ptx');
   ptxEditor = createEditor(monaco, $('ptx-editor'), { model: ptxModel, readOnly: true, lineNumbersMinChars: 4 });
   diffEditor = createDiffEditor(monaco, $('diff-editor'));
   linker = createLinker({ monaco, srcEditor, ptxEditor });
 
-  srcEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, saveActive);
-  srcEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, compileActive);
-  ptxEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, compileActive);
-  els.compile.addEventListener('click', compileActive);
+  const mod = monaco.KeyMod.CtrlCmd;
+  srcEditor.addCommand(mod | monaco.KeyCode.KeyS, saveActive);
+  for (const editor of [srcEditor, ptxEditor]) {
+    editor.addAction({
+      id: 'ide.primary', label: 'Run or compile the active file', contextMenuGroupId: 'ide', contextMenuOrder: 1,
+      keybindings: [mod | monaco.KeyCode.Enter], run: doPrimary,
+    });
+    editor.addCommand(mod | monaco.KeyCode.KeyP, () => palette.open('files'));
+    editor.addCommand(mod | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, () => palette.open('text'));
+  }
+  srcEditor.addAction({
+    id: 'ripple.ask', label: 'Ripple: Ask about selection', contextMenuGroupId: 'ide', contextMenuOrder: 2,
+    keybindings: [mod | monaco.KeyCode.KeyL], run: askAboutSelection,
+  });
+  srcEditor.onDidChangeCursorPosition((event) => {
+    els.cursor.textContent = `Ln ${event.position.lineNumber}, Col ${event.position.column}`;
+  });
+}
+
+function setupChrome() {
+  tree = createTree({
+    list: $('file-list'), getActive: () => state.active,
+    onOpen: (path) => openFile(path).catch((error) => setStatus(errorText(error), 'error')),
+    onDelete: deleteFile,
+  });
+  palette = createPalette({
+    dialog: /** @type {HTMLDialogElement} */ ($('palette')), input: /** @type {HTMLInputElement} */ ($('palette-input')),
+    list: $('palette-list'), getFiles: () => state.files,
+    search: async (query) => (await api.search(query)).hits,
+    onPick: (path, line) => openFile(path, line).catch((error) => setStatus(errorText(error), 'error')),
+  });
+  $('open-palette').addEventListener('click', () => palette.open('files'));
+  window.addEventListener('keydown', (event) => {
+    if (!(event.metaKey || event.ctrlKey)) return;
+    const key = event.key.toLowerCase();
+    if (key === 'p' && !event.shiftKey) { event.preventDefault(); palette.open('files'); }
+    if (key === 'f' && event.shiftKey) { event.preventDefault(); palette.open('text'); }
+  });
+
+  els.newFile.addEventListener('click', () => { els.newFileForm.hidden = false; els.newFilePath.value = ''; els.newFilePath.focus(); });
+  els.newFilePath.addEventListener('keydown', (event) => { if (event.key === 'Escape') els.newFileForm.hidden = true; });
+  els.newFileForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    els.newFileForm.hidden = true;
+    createFile(els.newFilePath.value).catch((error) => setStatus(errorText(error), 'error'));
+  });
+
+  els.primary.addEventListener('click', doPrimary);
   els.toolchain.addEventListener('click', () => refreshToolchain(true));
+  els.tabOutput.addEventListener('click', () => selectDock('output'));
   els.tabReport.addEventListener('click', () => selectDock('report'));
   els.tabLog.addEventListener('click', () => selectDock('log'));
   els.arch.value = prefs.get('arch', els.arch.value);
   els.flags.value = prefs.get('flags', '');
-  els.arch.addEventListener('change', () => prefs.set('arch', els.arch.value));
-  els.flags.addEventListener('change', () => prefs.set('flags', els.flags.value));
+  const rebuild = () => { if (state.active && kindOf(state.active) === 'cuda') liveCompile(state.active); };
+  els.arch.addEventListener('change', () => { prefs.set('arch', els.arch.value); rebuild(); });
+  els.flags.addEventListener('change', () => { prefs.set('flags', els.flags.value); rebuild(); });
+  bindToggle(els.toggleLive, 'live', rebuild);
+  bindToggle(els.toggleSuggest, 'suggest', () => showSuggestState({ phase: 'idle' }));
+  bindToggle(els.toggleDebug, 'showDebugLines', applyDebugLineFilter);
+
+  const width = (id) => $(id).getBoundingClientRect().width;
+  const height = (id) => $(id).getBoundingClientRect().height;
+  setupDividers([
+    { id: 'divide-files', variable: '--files-w', axis: 'x', direction: 1, min: 160, max: () => 480, measure: () => width('files') },
+    { id: 'divide-ripple', variable: '--ripple-w', axis: 'x', direction: -1, min: 264, max: () => window.innerWidth * 0.5, measure: () => width('ripple') },
+    { id: 'divide-split', variable: '--src-w', axis: 'x', direction: 1, min: 160, max: () => width('split') - 160, measure: () => width('src-pane') },
+    { id: 'divide-dock', variable: '--dock-h', axis: 'y', direction: -1, min: 96, max: () => height('stage') - 160, measure: () => height('dock') },
+  ]);
+
   window.addEventListener('unhandledrejection', (event) => {
-    if (event.reason?.name === 'Canceled') event.preventDefault(); // Monaco cancels a pending diff when its models go away
+    if (event.reason?.name === 'Canceled') event.preventDefault(); // Monaco cancels pending work when its models go away
   });
   window.addEventListener('beforeunload', (event) => {
     if ([...state.open.keys()].some(isDirty)) event.preventDefault();
   });
+}
 
-  createAgent({
+function setupRipple() {
+  const tools = createRippleTools({
+    listFiles: refreshFiles,
+    readText: async (path) => { const entry = await ensureOpen(path); renderTabs(); return entry.model.getValue(); },
+    kernelKindOf: kindOf,
+    search: async (query) => (await api.search(query)).hits,
+    confirmRun: (path) => askConfirm('Ripple wants to run a file', path),
+    run: runFile,
+    compile,
+    baselineOf: (path) => state.baselines.get(path),
+    confirmWrite: askForWrite,
+    applyWrite,
+  });
+  agent = createAgent({
     els: {
       chat: $('chat'), form: /** @type {HTMLFormElement} */ ($('composer')),
       prompt: /** @type {HTMLTextAreaElement} */ ($('prompt')), send: /** @type {HTMLButtonElement} */ ($('send')),
       quick: $('quick'), ctx: $('ctx'), perf: $('perf'),
     },
     getPreset: () => els.preset.value,
-    systemPrompt,
-    tools: rippleTools,
+    systemPrompt: () => systemPrompt({
+      active: state.active, kernel: state.active ? kindOf(state.active) : null,
+      toolchain: state.toolchain, arch: els.arch.value, canRun: state.run.enabled,
+    }),
+    tools,
   });
+  agent.setQuick(QUICK_PROMPTS.general);
+  registerQuickFixes({ monaco, askRipple: (prompt) => agent.send(prompt) });
+  const pathOf = (model) => model.uri.path.replace(/^\//, '');
+  registerInlineSuggestions({
+    monaco,
+    getPreset: () => els.preset.value,
+    isEnabled: () => state.suggest,
+    onState: showSuggestState,
+    getLanguage: (model) => (kindOf(pathOf(model)) === 'triton' ? 'triton' : model.getLanguageId()),
+    getFindings: (model) => (state.results.get(pathOf(model))?.analysis?.lints || [])
+      .filter((lint) => lint.src).slice(0, MAX_FINDINGS_FOR_SUGGESTIONS)
+      .map((lint) => `${lint.code} at source line ${lint.src.line}`),
+  });
+}
 
+async function boot() {
+  monaco = await loadMonaco();
+  await registerKernelLanguages(monaco);
+  setupEditors();
+  setupChrome();
+  setupRipple();
   renderReport(els.report, { analysis: null, res: null, sourceName: '', onJump: jump });
   await Promise.all([refreshFiles(), refreshToolchain(), loadPresets()]);
+  updatePrimary();
   const remembered = prefs.get('active', '');
-  const first = state.files.find((f) => f.path === remembered) || state.files.find((f) => kindOf(f.path) === 'cuda') || state.files[0];
+  const first = state.files.find((f) => f.path === remembered) || state.files.find((f) => /readme/i.test(f.path)) || state.files[0];
   if (first) await openFile(first.path);
   document.body.dataset.ready = '1';
 }

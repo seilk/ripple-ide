@@ -29,13 +29,26 @@ export function $(id) {
   return el;
 }
 
-/** @param {string} path @returns {'cuda'|'ptx'|'triton'|'text'} */
-export function kindOf(path) {
-  const ext = path.includes('.') ? path.split('.').pop().toLowerCase() : '';
-  if (['cu', 'cuh', 'cpp', 'cc', 'c', 'h', 'hpp'].includes(ext)) return 'cuda';
+/** @param {string} path @returns {string} lower-case extension without the dot, or '' */
+export function extOf(path) {
+  const name = path.split('/').pop() || '';
+  return name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+}
+
+/**
+ * Kernel kind of a file, or null for an ordinary file. Kernel files get the
+ * PTX pane, the kernel report and the kernel tools.
+ * @param {string} path
+ * @param {string} [text] file content, needed to tell a Triton or CUDA file from plain Python or C++
+ * @returns {'cuda'|'ptx'|'triton'|null}
+ */
+export function kernelKind(path, text = '') {
+  const ext = extOf(path);
+  if (ext === 'cu' || ext === 'cuh') return 'cuda';
   if (ext === 'ptx') return 'ptx';
-  if (ext === 'py') return 'triton';
-  return 'text';
+  if (['c', 'cc', 'cpp'].includes(ext) && /\b__(?:global|device)__\b/.test(text)) return 'cuda';
+  if (ext === 'py' && /^\s*(?:import|from)\s+triton\b|@triton\.jit/m.test(text)) return 'triton';
+  return null;
 }
 
 /** @param {unknown} error @returns {string} */

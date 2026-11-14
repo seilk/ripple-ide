@@ -4,6 +4,9 @@
 
 .report-head { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin-bottom: var(--space-3); font: 400 var(--text-meta) var(--font-code); color: var(--text-3); }
 .report-head .backend { color: var(--text); }
+.notes { margin-bottom: var(--space-3); font-size: var(--text-meta); color: var(--text-3); }
+.notes summary { cursor: pointer; }
+.notes .note { margin-top: var(--space-2); }
 .note { margin: 0 0 var(--space-2); padding: var(--space-1) var(--space-3); border-left: 1px solid var(--hairline-strong); color: var(--text-2); }
 
 .fn { display: grid; grid-template-columns: 128px minmax(232px, 1fr) minmax(264px, 1.5fr); gap: var(--space-3) var(--space-8); padding: var(--space-4) 0 var(--space-6); border-top: 1px solid var(--hairline); }
@@ -23,8 +26,17 @@
 
 .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3) var(--space-4); align-content: start; }
 .metrics dt { font-size: var(--text-meta); line-height: 16px; color: var(--text-3); white-space: nowrap; }
-.metrics dd { font: 500 var(--text-title)/24px var(--font-code); }
-.metrics dd[data-flag] { color: var(--accent); }
+.metrics dd { display: flex; align-items: baseline; gap: var(--space-2); font: 500 var(--text-title)/24px var(--font-code); }
+.metrics dd [data-flag] { color: var(--accent); }
+
+/* Change against the baseline compile. Lower is better for every tracked number. */
+.delta { font: 400 var(--text-meta) var(--font-code); }
+.delta[data-dir="down"] { color: var(--positive); }
+.delta[data-dir="up"] { color: var(--negative); }
+.figure-num .delta { margin-left: var(--space-2); }
+.baseline { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); font-size: var(--text-meta); color: var(--text-3); }
+.quiet { height: 20px; padding: 0 var(--space-2); border: 1px solid var(--hairline); border-radius: var(--radius-tag); background: none; font-size: var(--text-meta); color: var(--text-2); transition: border-color var(--duration) var(--ease), color var(--duration) var(--ease); }
+.quiet:hover { border-color: var(--hairline-strong); color: var(--text); }
 
 /* One series: memory instructions lead, the rest sit in neutral steps. */
 .mix { display: flex; gap: 1px; height: 8px; border-radius: 2px; overflow: hidden; }
@@ -66,6 +78,11 @@
 .diag:hover { background: var(--surface-raised); }
 
 .log { margin: 0; padding: var(--space-4) var(--space-6); overflow: auto; font-size: var(--text-meta); line-height: 20px; color: var(--text-2); white-space: pre-wrap; }
+.log[hidden], .report[hidden] { display: none; }
+.output { color: var(--text); }
+.output .run-meta { color: var(--text-3); }
+.output .run-meta[data-failed] { color: var(--negative); }
+.output:empty::before { content: "Run a file to see its output here"; color: var(--text-3); font-family: var(--font-ui); font-size: var(--text-body); }
 
 /* ---------------------------------------------------------------- Ripple */
 .chat { overflow: auto; padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-4); }
@@ -102,3 +119,20 @@
 .diff-dialog header span { font: 400 var(--text-meta) var(--font-code); color: var(--text-2); }
 .diff-dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: 1px solid var(--hairline); }
 .diff-editor { min-height: 0; }
+
+.confirm-dialog { width: min(480px, 92vw); padding: var(--space-6); border: 1px solid var(--hairline-strong); border-radius: var(--radius-panel); background: var(--surface-card); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); }
+.confirm-dialog[open] { display: grid; gap: var(--space-3); }
+.confirm-dialog::backdrop, .palette::backdrop { background: rgba(0, 0, 0, 0.6); }
+.confirm-dialog b { font-weight: 500; font-size: var(--text-title); }
+.confirm-dialog code { padding: var(--space-2) var(--space-3); border-radius: var(--radius-control); background: var(--surface-raised); font-size: var(--text-meta); overflow-wrap: anywhere; }
+.confirm-dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+
+.palette { width: min(640px, 92vw); max-height: 60vh; margin-top: 12vh; padding: var(--space-2); border: 1px solid var(--hairline-strong); border-radius: var(--radius-panel); background: var(--surface-card); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); }
+.palette[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: var(--space-2); }
+.palette input { height: 36px; padding: 0 var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-raised); }
+.palette input:focus { outline: none; border-color: var(--hairline-strong); }
+.palette ul { overflow: auto; display: grid; gap: 2px; }
+.palette-row { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: var(--space-4); align-items: center; width: 100%; height: var(--row-h); padding: 0 var(--space-3); border: 0; border-radius: var(--radius-control); background: none; text-align: left; color: var(--text-2); }
+.palette-row[aria-selected="true"], .palette-row:hover { background: var(--surface-raised); color: var(--text); }
+.palette-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font: 400 var(--text-meta) var(--font-code); }
+.palette-none { padding: var(--space-2) var(--space-3); color: var(--text-3); }

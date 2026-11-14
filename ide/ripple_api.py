@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from http.client import HTTPResponse
 
 UPSTREAM_TIMEOUT_S = 900
+COMPLETE_TIMEOUT_S = 30
 RIPPLE_CONTEXT = 1_048_576
 
 PRESETS: dict[str, dict] = {
@@ -106,7 +107,11 @@ def open_upstream(preset: dict, body: dict) -> HTTPResponse:
         if name in body:
             payload[name] = body[name]
 
-    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    return _post(preset, payload, "text/event-stream", UPSTREAM_TIMEOUT_S)
+
+
+def _post(preset: dict, payload: dict, accept: str, timeout_s: float) -> HTTPResponse:
+    headers = {"Content-Type": "application/json", "Accept": accept}
     key = preset_key(preset)
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -120,11 +125,24 @@ def open_upstream(preset: dict, body: dict) -> HTTPResponse:
         method="POST",
     )
     try:
-        return urllib.request.urlopen(request, timeout=UPSTREAM_TIMEOUT_S)  # noqa: S310 - fixed preset URLs
+        return urllib.request.urlopen(request, timeout=timeout_s)  # noqa: S310 - fixed preset URLs
     except urllib.error.HTTPError as exc:
         raise UpstreamError(exc.code, f"upstream {exc.code}", exc.read().decode(errors="replace")[:4000]) from exc
-    except urllib.error.URLError as exc:
-        raise UpstreamError(502, f"cannot reach {preset['base_url']}: {exc.reason}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise UpstreamError(502, f"cannot reach {preset['base_url']}: {reason}") from exc
+
+
+def complete_once(preset: dict, messages: list[dict], max_tokens: int, temperature: float) -> str:
+    """One short non-streamed answer, for inline completion."""
+    payload = {"model": preset["model"], "messages": messages, "stream": False,
+               "max_tokens": max_tokens, "temperature": temperature}
+    try:
+        with _post(preset, payload, "application/json", COMPLETE_TIMEOUT_S) as response:
+            data = json.load(response)
+        return str(data["choices"][0]["message"].get("content") or "")
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise UpstreamError(502, f"unexpected completion answer: {exc}") from exc
 
 
 # ------------------------------------------------------------------ mock
@@ -187,7 +205,7 @@ def mock_plan(messages: list[dict]) -> tuple[str, str, tuple[str, dict] | None]:
     match = re.search(r"^Active file: (.+)$", system, re.MULTILINE)
     active = match.group(1).strip() if match else None
     last = messages[-1] if messages else {}
-    asked = " ".join(str(m.get("content", "")) for m in messages if m.get("role") == "user").lower()
+    asked = next((str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), "").lower()
 
     if active is None or active == "(none)":
         return ("No file is open.", "Open a kernel file first, then ask again.", None)
@@ -201,9 +219,17 @@ def mock_plan(messages: list[dict]) -> tuple[str, str, tuple[str, dict] | None]:
             return ("A one-line header comment is a safe, visible edit.",
                     "I will add a header comment. Check the diff.\n",
                     ("write_file", {"path": active, "content": header + str(last.get("content", ""))}))
-        if previous == "read_file":
+        if previous == "read_file" and active.endswith((".cu", ".cuh", ".ptx")):
             return ("The PTX and the lint findings say more than the source alone.",
                     "Compiling to PTX.\n", ("compile_kernel", {"path": active}))
+        if previous == "read_file" and "run" in asked and active.endswith((".py", ".js", ".mjs", ".sh")):
+            return ("Running it shows what it does.", "Running the file.\n", ("run_file", {"path": active}))
+        if previous == "read_file":
+            lines = str(last.get("content", "")).count("\n") + 1
+            return ("", f"{active} has {lines} lines. This is the offline mock, so there is no real review. "
+                        "Pick a Ripple endpoint for one.", None)
+        if previous == "run_file":
+            return ("", f"The run finished. Output:\n{str(last.get('content', ''))[:400]}", None)
         if previous == "compile_kernel":
             return ("", _summarize_report(str(last.get("content", ""))), None)
         if previous == "write_file":

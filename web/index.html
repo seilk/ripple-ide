@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ripple Kernel IDE</title>
+  <title>Ripple IDE</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230f0f10'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23ededed'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23ededed' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -18,22 +18,26 @@
       <svg class="brand-mark" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
         <circle cx="12" cy="12" r="2.5" /><circle cx="12" cy="12" r="6.5" /><circle cx="12" cy="12" r="10.5" />
       </svg>
-      <span class="brand-name">Ripple Kernel IDE</span>
+      <span class="brand-name">Ripple IDE</span>
     </div>
 
-    <button id="toolchain" class="toolchain" type="button" title="Check the toolchain again">Checking toolchain</button>
+    <button id="open-palette" class="search-box" type="button" title="Go to file (Cmd/Ctrl+P). Search in files: Cmd/Ctrl+Shift+F">
+      <span>Go to file</span><kbd>⌘P</kbd>
+    </button>
 
     <div class="build">
-      <label class="field"><span>Arch</span>
+      <button id="toolchain" class="toolchain kernel-only" type="button" title="Check the toolchain again">Checking toolchain</button>
+      <label class="field kernel-only"><span>Arch</span>
         <select id="arch" aria-label="GPU architecture">
           <option>sm_80</option><option>sm_90</option><option selected>sm_100</option><option>sm_120</option>
         </select>
       </label>
-      <label class="field grow"><span>Flags</span>
+      <label class="field grow kernel-only"><span>Flags</span>
         <input id="flags" type="text" spellcheck="false" placeholder="-O3 -DN=4" aria-label="Compiler flags">
       </label>
-      <button id="compile" class="button primary" type="button"><span id="compile-label">Compile to PTX</span><kbd>⌘↵</kbd></button>
     </div>
+
+    <button id="primary" class="button primary" type="button"><span id="primary-label">Run</span><kbd>⌘↵</kbd></button>
 
     <div class="model">
       <span id="perf" class="perf" title="Time to first token and output speed of the last Ripple answer"></span>
@@ -42,45 +46,76 @@
   </header>
 
   <main class="bench">
-    <nav class="files" aria-label="Workspace files">
-      <h2>Workspace</h2>
+    <div id="divide-files" class="divider divider-x" role="separator" aria-orientation="vertical" aria-label="Resize file list" tabindex="0"></div>
+    <div id="divide-ripple" class="divider divider-x" role="separator" aria-orientation="vertical" aria-label="Resize Ripple panel" tabindex="0"></div>
+
+    <nav id="files" class="files" aria-label="Project files">
+      <div class="files-head">
+        <h2>Files</h2>
+        <button id="new-file" class="quiet" type="button" title="New file">New file</button>
+      </div>
       <p id="root" class="root"></p>
+      <form id="new-file-form" class="new-file" hidden>
+        <input id="new-file-path" type="text" spellcheck="false" placeholder="folder/name.py" aria-label="Path of the new file">
+      </form>
       <ul id="file-list"></ul>
+      <h2 id="outline-title" class="group" hidden>Kernels in this file</h2>
+      <ul id="outline"></ul>
     </nav>
 
-    <section class="stage" aria-label="Editor">
+    <section id="stage" class="stage" aria-label="Editor">
       <div id="tabs" class="tabs" role="tablist"></div>
-      <div id="split" class="split">
-        <div class="pane">
+      <div id="split" class="split" data-single>
+        <div id="src-pane" class="pane">
           <div id="src-editor" class="editor"></div>
+          <div id="welcome" class="empty welcome">
+            <b>Open a file from the list</b>
+            <span>Go to file <kbd>⌘P</kbd></span>
+            <span>Search in files <kbd>⇧⌘F</kbd></span>
+            <span>Ask Ripple about a selection <kbd>⌘L</kbd></span>
+          </div>
         </div>
+        <div id="divide-split" class="divider divider-x" role="separator" aria-orientation="vertical" aria-label="Resize source and PTX" tabindex="0"></div>
         <div class="pane ptx-pane">
-          <header class="pane-head"><b>PTX</b><span id="ptx-meta"></span></header>
+          <header class="pane-head"><b>PTX</b><span id="ptx-meta"></span>
+            <button id="toggle-debug" class="toggle" type="button" aria-pressed="false" title="Show .loc lines and debug labels">Line info</button>
+          </header>
           <div id="ptx-editor" class="editor"></div>
           <div id="ptx-empty" class="empty"><b>Compile to see the PTX</b><span>The cursor line in the source marks its instructions here</span></div>
         </div>
       </div>
-      <section class="dock" aria-label="Kernel report">
+      <section id="dock" class="dock" aria-label="Output and reports">
+        <div id="divide-dock" class="divider divider-y" role="separator" aria-orientation="horizontal" aria-label="Resize bottom panel" tabindex="0"></div>
         <div class="dock-tabs" role="tablist">
-          <button id="tab-report" role="tab" aria-selected="true" type="button">Report</button>
-          <button id="tab-log" role="tab" aria-selected="false" type="button">Compiler log</button>
-          <span id="status" class="status" role="status"></span>
+          <button id="tab-output" role="tab" aria-selected="true" type="button">Output</button>
+          <button id="tab-report" class="kernel-only" role="tab" aria-selected="false" type="button">Kernel report</button>
+          <button id="tab-log" class="kernel-only" role="tab" aria-selected="false" type="button">Compiler log</button>
         </div>
-        <div id="report" class="report"></div>
+        <pre id="output" class="log output"></pre>
+        <div id="report" class="report" hidden></div>
         <pre id="log" class="log" hidden></pre>
       </section>
     </section>
 
-    <aside class="ripple" aria-label="Ripple">
+    <aside id="ripple" class="ripple" aria-label="Ripple">
       <header class="pane-head"><b>Ripple</b><span id="ctx" title="Prompt tokens of the last request, of the context size"></span></header>
       <div id="chat" class="chat" aria-live="polite"></div>
       <div id="quick" class="quick"></div>
       <form id="composer" class="composer">
-        <textarea id="prompt" rows="3" placeholder="Ask about this kernel" aria-label="Message for Ripple"></textarea>
+        <textarea id="prompt" rows="3" placeholder="Ask about this file" aria-label="Message for Ripple"></textarea>
         <button id="send" class="button primary" type="submit">Send</button>
       </form>
     </aside>
   </main>
+
+  <footer class="statusbar">
+    <span id="status" class="status" role="status"></span>
+    <span id="suggest-state" class="suggest-state" role="status"></span>
+    <button id="toggle-suggest" class="toggle" type="button" aria-pressed="true" title="Inline suggestions while you type. Tab accepts, Esc dismisses">Suggestions</button>
+    <button id="toggle-live" class="toggle kernel-only" type="button" aria-pressed="true" title="Compile CUDA files as you type">Live compile</button>
+    <span id="cursor">Ln 1, Col 1</span>
+    <span id="language"></span>
+  </footer>
 
   <dialog id="diff-dialog" class="diff-dialog" aria-labelledby="diff-title">
     <header><b id="diff-title">Review change</b><span id="diff-path"></span></header>
@@ -89,6 +124,20 @@
       <button id="diff-reject" class="button" type="button">Reject</button>
       <button id="diff-accept" class="button primary" type="button">Apply</button>
     </footer>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <b id="confirm-title"></b>
+    <code id="confirm-detail"></code>
+    <footer>
+      <button id="confirm-no" class="button" type="button">Cancel</button>
+      <button id="confirm-yes" class="button primary" type="button">Allow</button>
+    </footer>
+  </dialog>
+
+  <dialog id="palette" class="palette" aria-label="Go to file or search">
+    <input id="palette-input" type="text" spellcheck="false" autocomplete="off" aria-label="File name or search text">
+    <ul id="palette-list"></ul>
   </dialog>
 
   <script src="vendor/monaco/vs/loader.js"></script>

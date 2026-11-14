@@ -25,9 +25,18 @@ python3 server.py
 | Reasoning | `delta.reasoning` or `delta.reasoning_content` (both accepted) |
 | Tool calls | `delta.tool_calls[]` with `index`, `id`, `function.name`, `function.arguments` fragments |
 | Usage | a last chunk with `usage` (`stream_options.include_usage`) |
-| Tools sent | `list_files`, `read_file`, `compile_kernel`, `write_file`, `tool_choice: auto` |
+| Tools sent | `list_files`, `read_file`, `search_files`, `write_file`, `run_file`, `compile_kernel`, `tool_choice: auto` |
 
 With vLLM this is `--reasoning-parser ripple --enable-auto-tool-choice --tool-call-parser ripple`.
+
+## Inline suggestions
+
+The same endpoint serves ghost text: one short request per pause in typing,
+`stream: false`, `max_tokens: 192`, `temperature: 0.2`. The prompt is a
+fill-in-the-middle request for a chat model (text before and after the cursor),
+and the server cleans the answer (code fences, repeated text). Latency of this
+call is what the user feels while typing, so it gains the most from a fast
+runtime. The status bar shows the time of each suggestion.
 
 ## What the IDE shows about the runtime
 

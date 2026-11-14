@@ -32,17 +32,26 @@ export const api = {
   files: () => request('/api/files'),
   read: (path) => request(`/api/file?path=${encodeURIComponent(path)}`),
   write: (path, content) => request('/api/file', json('PUT', { path, content })),
+  remove: (path) => request(`/api/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+  search: (query) => request(`/api/search?q=${encodeURIComponent(query)}`),
   compile: (payload) => request('/api/compile', json('POST', payload)),
 };
 
+/** Stream one chat completion. */
+export const streamChat = (payload, onEvent, signal) => streamEvents('/api/chat', payload, onEvent, signal);
+
+/** Run one workspace file and stream its output. */
+export const streamRun = (path, onEvent, signal) => streamEvents('/api/run', { path }, onEvent, signal);
+
 /**
- * Stream one chat completion. Calls `onEvent` for each SSE JSON event.
+ * POST and read a server-sent event stream. Calls `onEvent` for each JSON event.
+ * @param {string} url
  * @param {object} payload
  * @param {(event: any) => void} onEvent
- * @param {AbortSignal} signal
+ * @param {AbortSignal} [signal]
  */
-export async function streamChat(payload, onEvent, signal) {
-  const response = await fetch('/api/chat', { ...json('POST', payload), signal });
+async function streamEvents(url, payload, onEvent, signal) {
+  const response = await fetch(url, { ...json('POST', payload), signal });
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => ({}));
     const detail = body.detail ? `: ${String(body.detail).slice(0, 300)}` : '';

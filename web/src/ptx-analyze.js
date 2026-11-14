@@ -316,13 +316,14 @@ export function buildLineLinks(analysis, sourceName) {
 }
 
 /** Compact report for the model: numbers and findings, no PTX text. */
-export function summarize(analysis, sourceName, ptxasFunctions = []) {
+export function summarize(analysis, sourceName, ptxasFunctions = [], changes = {}) {
   const want = basename(sourceName);
   const registers = new Map(ptxasFunctions.map((f) => [f.function, f]));
   return {
     target: analysis.target,
     functions: analysis.functions.map((fn) => ({
       name: fn.pretty, symbol: fn.name, kind: fn.kind, instructions: fn.instructions,
+      change_vs_baseline: changes[fn.name] || {},
       loops: fn.loops.length, loads: fn.loads, stores: fn.stores, fp64_ops: fn.fp64Ops,
       local_memory_bytes: fn.localDepotBytes, calls: fn.calls,
       registers: registers.get(fn.name)?.registers ?? null,

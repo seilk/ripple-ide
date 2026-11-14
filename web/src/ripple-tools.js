@@ -1,0 +1,94 @@
+// What Ripple can do in the IDE, and what it is told about the session.
+
+import { delta, snapshot } from './baseline.js';
+import { summarize } from './ptx-analyze.js';
+const MAX_DIAGNOSTICS_FOR_MODEL = 20;
+const MAX_RUN_OUTPUT_CHARS = 8000;
+
+/**
+ * @param {{
+ *   listFiles: () => Promise<Array<{path: string}>>,
+ *   readText: (path: string) => Promise<string>,
+ *   kernelKindOf: (path: string) => 'cuda'|'ptx'|'triton'|null,
+ *   search: (query: string) => Promise<Array<{path: string, line: number, text: string}>>,
+ *   confirmRun: (path: string) => Promise<boolean>,
+ *   run: (path: string) => Promise<{code: number, output: string, seconds: number}>,
+ *   compile: (path: string) => Promise<{res: any, analysis: any}>,
+ *   baselineOf: (path: string) => {fns: Record<string, any>}|undefined,
+ *   confirmWrite: (path: string, before: string, after: string) => Promise<boolean>,
+ *   applyWrite: (path: string, content: string) => Promise<void>,
+ * }} ide
+ */
+export function createRippleTools(ide) {
+  return {
+    list_files: () => ide.listFiles(),
+
+    read_file: ({ path }) => {
+      if (typeof path !== 'string' || !path) throw new Error('path is required');
+      return ide.readText(path);
+    },
+
+    search_files: ({ query }) => {
+      if (typeof query !== 'string' || query.length < 2) throw new Error('query needs at least 2 characters');
+      return ide.search(query);
+    },
+
+    run_file: async ({ path }) => {
+      if (typeof path !== 'string' || !path) throw new Error('path is required');
+      if (!(await ide.confirmRun(path))) return { rejected: true, message: 'The user did not allow this run.' };
+      const { code, output, seconds } = await ide.run(path);
+      return { exit_code: code, seconds, output: output.slice(-MAX_RUN_OUTPUT_CHARS) };
+    },
+
+    compile_kernel: async ({ path }) => {
+      const kind = ide.kernelKindOf(path);
+      if (kind === null) return { error: 'Not a kernel file. compile_kernel is for .cu and .ptx files.' };
+      if (kind === 'triton') return { error: 'Triton files run Python on the runner. Ask the user to press Run.' };
+      const { res, analysis } = await ide.compile(path);
+      const base = ide.baselineOf(path);
+      const now = analysis ? snapshot(analysis, res.ptxas.functions) : {};
+      const changes = Object.fromEntries(Object.keys(now).map((symbol) => [symbol, delta(base?.fns[symbol], now[symbol])]));
+      return {
+        ok: res.ok, backend: res.backend, arch: res.arch, notes: res.notes,
+        diagnostics: res.diagnostics.slice(0, MAX_DIAGNOSTICS_FOR_MODEL),
+        ...(analysis && res.ok ? summarize(analysis, path, res.ptxas.functions, changes) : { functions: [], lints: [] }),
+      };
+    },
+
+    write_file: async ({ path, content }) => {
+      if (typeof path !== 'string' || !path) throw new Error('path is required');
+      if (typeof content !== 'string') throw new Error('content must be a string');
+      const files = await ide.listFiles();
+      const before = files.some((file) => file.path === path) ? await ide.readText(path) : '';
+      if (!(await ide.confirmWrite(path, before, content))) {
+        return { rejected: true, message: 'The user rejected this change.' };
+      }
+      await ide.applyWrite(path, content);
+      return { written: path, bytes: content.length };
+    },
+  };
+}
+
+/** @param {{active: string|null, kernel: string|null, toolchain: any, arch: string, canRun: boolean}} session */
+export function systemPrompt({ active, kernel, toolchain, arch, canRun }) {
+  const tc = toolchain || {};
+  const lines = [
+    'You are Ripple, the coding model inside Ripple IDE. You work on the files of the open project with tools.',
+    'Read before you edit. Use search_files to find things. Check your work: run the file or compile the kernel '
+      + 'after an edit, and report what the tool showed. Do not claim a result that no tool showed.',
+    'write_file replaces the whole file and the user reviews a diff. Keep edits small and explain each one in one line.',
+    canRun ? 'run_file runs a .py, .js, .mjs or .sh file after the user allows it.' : 'run_file is off on this server.',
+    `Active file: ${active || '(none)'}`,
+  ];
+  if (kernel) {
+    lines.push(
+      `The active file is a GPU kernel (${kernel}). Work like a kernel engineer: compile it, read the report, then act. `
+        + 'After every edit, compile again and read change_vs_baseline. The report counts instructions, loops, memory '
+        + 'traffic by state space, double-precision ops, thread-local memory and (with ptxas) registers and spills. '
+        + 'It does not measure run time.',
+      `Toolchain: frontend=${tc.cuda_frontend || 'none'}, ptxas=${tc.ptxas ? 'yes' : 'no'}, arch=${arch}, runner=${tc.runner || 'local'}`,
+      tc.cuda_frontend === 'clang-nvptx' ? 'The PTX is a clang NVPTX preview, not nvcc output. Say so when it matters.' : '',
+    );
+  }
+  return lines.filter(Boolean).join('\n');
+}

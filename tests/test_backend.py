@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ide import ripple_api
+from ide import complete, ripple_api, runner
 from ide.toolchain import (CompileRequest, Toolchain, ToolchainError, parse_diagnostics, parse_ptxas_log,
                            ptx_feature_for, validate_flags, validate_request)
 from ide.workspace import Workspace, WorkspaceError
@@ -118,7 +118,7 @@ def test_clang_preview_compiles_a_real_kernel():
     chain = Toolchain()
     if chain.info(refresh=True).cuda_frontend != "clang-nvptx":
         pytest.skip("needs a clang with the NVPTX target and no nvcc")
-    source = (ROOT / "workspace" / "rowsum.cu").read_text()
+    source = (ROOT / "workspace" / "kernels" / "rowsum.cu").read_text()
 
     result = chain.compile(CompileRequest("rowsum.cu", source, arch="sm_100"))
 
@@ -277,3 +277,177 @@ def test_http_shared_host_must_be_allowed_by_name(tmp_path):
         assert _call(url, headers={"Host": "box.tailnet.ts.net:8787", "Origin": "https://evil.example"})[0] == 403
     finally:
         server.shutdown()
+
+
+# ---------------------------------------------------------------- inline completion
+
+
+def _req(prefix: str, suffix: str = "", language: str = "cuda") -> complete.CompletionRequest:
+    return complete.parse_request({"path": "k.cu", "language": language, "prefix": prefix, "suffix": suffix})
+
+
+@pytest.mark.parametrize(("language", "prefix", "expected"), [
+    ("cuda", "  int i = ", "blockIdx.x * blockDim.x + threadIdx.x;"),
+    ("cuda", "  y[i] = a * x[i] + 0.5", "f"),
+    ("cuda", "  __sync", "threads();"),
+    ("triton", "    offsets = ", "tl.arange(0, BLOCK)"),
+    ("ptx", "\tld.", "global.f32 \t%f1, [%rd1];"),
+])
+def test_idioms_complete_kernel_patterns(language, prefix, expected):
+    assert complete.mock_complete(_req("x\n" + prefix, language=language)) == expected
+
+
+def test_idioms_stay_quiet_mid_line_and_on_other_text():
+    assert complete.mock_complete(_req("  int i = ", suffix="foo(); // rest")) == ""
+    assert complete.mock_complete(_req("  int i = ", suffix=");\nnext")) != ""
+    assert complete.mock_complete(_req("  float x = y")) == ""
+    assert complete.mock_complete(_req("  y = 0.5f")) == ""
+    assert complete.mock_complete(_req("  v1.5")) == ""  # not a float literal
+
+
+def test_model_answer_is_cleaned_for_ghost_text():
+    req = _req("void f() {\n  int i = ", suffix="\n  if (i < n) return;\n}")
+
+    fenced = complete.clean_completion("```cpp\nblockIdx.x * blockDim.x + threadIdx.x;\n```", req)
+    echoed = complete.clean_completion("  int i = threadIdx.x;", req)
+    overrun = complete.clean_completion("threadIdx.x;\n  if (i < n) return;\n}", req)
+    long = complete.clean_completion("\n".join(f"line{n};" for n in range(40)), req)
+
+    assert fenced == "blockIdx.x * blockDim.x + threadIdx.x;"
+    assert echoed == "threadIdx.x;"
+    assert overrun == "threadIdx.x;"
+    assert len(long.split("\n")) == complete.MAX_LINES
+    assert complete.clean_completion("   \n", req) == ""
+
+
+def test_completion_prompt_carries_findings_and_both_sides():
+    req = complete.parse_request({"path": "k.cu", "language": "cuda", "prefix": "A" * 9000, "suffix": "tail",
+                                  "findings": ["fp64 at source line 7"]})
+    system, user = complete.build_messages(req)
+
+    assert len(req.prefix) == complete.MAX_PREFIX_CHARS
+    assert "f suffix" in system["content"]
+    assert "fp64 at source line 7" in user["content"] and "<after_cursor>\ntail" in user["content"]
+
+
+@pytest.mark.parametrize("body", [{"language": "ja va; rm", "prefix": ""}, {"language": "cuda"},
+                                  {"language": "cuda", "prefix": "x", "findings": "nope"}])
+def test_completion_request_validation(body):
+    with pytest.raises(ValueError):
+        complete.parse_request(body)
+
+
+def test_http_complete_mock_and_bad_request(ide):
+    status, body, _ = _call(f"{ide}/api/complete", "POST", {
+        "preset": "mock", "language": "cuda", "path": "k.cu", "prefix": "  float s = 0.25", "suffix": ""})
+    assert status == 200 and json.loads(body)["completion"] == "f" and json.loads(body)["source"] == "idioms"
+    assert _call(f"{ide}/api/complete", "POST", {"preset": "mock", "language": "c o b o l", "prefix": ""})[0] == 400
+
+
+def test_http_complete_uses_the_model_answer(ide, monkeypatch):
+    import http.server
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            sent = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert sent["stream"] is False and sent["max_tokens"] == complete.MAX_TOKENS
+            answer = json.dumps({"choices": [{"message": {"content": "```\n  int i = threadIdx.x;\n```"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+        def log_message(self, *args):
+            pass
+
+    upstream = http.server.HTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    monkeypatch.setitem(ripple_api.PRESETS["runtime"], "base_url", f"http://127.0.0.1:{upstream.server_address[1]}/v1")
+    try:
+        status, body, _ = _call(f"{ide}/api/complete", "POST", {
+            "preset": "runtime", "language": "cuda", "prefix": "void f() {\n  int i = ", "suffix": "\n}"})
+    finally:
+        upstream.shutdown()
+
+    assert status == 200 and json.loads(body) | {"ms": 0} == {"completion": "threadIdx.x;", "source": "ripple", "ms": 0}
+
+
+def test_completion_is_general_and_kernel_rules_apply_to_kernel_files_only():
+    python = complete.parse_request({"language": "python", "prefix": "if __name__ == ", "path": "a.py"})
+    cuda = complete.parse_request({"language": "cuda", "prefix": "x", "path": "k.cu"})
+
+    assert complete.mock_complete(python).startswith('"__main__":')
+    assert "GPU kernel" not in complete.build_messages(python)[0]["content"]
+    assert "GPU kernel" in complete.build_messages(cuda)[0]["content"]
+
+
+# ---------------------------------------------------------------- run, search, delete
+
+
+def test_run_file_streams_output_and_exit_code(tmp_path):
+    script = tmp_path / "hi.py"
+    script.write_text("import sys\nprint('hello')\nprint('oops', file=sys.stderr)\nsys.exit(3)\n")
+
+    events = [e for e in runner.run_file(script, tmp_path) if e["type"] != "ping"]
+
+    assert "hello\n" in [e.get("text") for e in events] and "oops\n" in [e.get("text") for e in events]
+    assert events[-1]["type"] == "exit" and events[-1]["code"] == 3 and events[-1]["command"] == "python3 -u hi.py"
+
+
+def test_run_file_stops_at_the_time_limit(tmp_path):
+    script = tmp_path / "loop.py"
+    script.write_text("import time\nprint('start', flush=True)\ntime.sleep(30)\n")
+
+    events = list(runner.run_file(script, tmp_path, timeout_s=1.5))
+
+    assert events[-1]["note"] == "stopped after 1 s" and events[-1]["code"] != 0
+    assert events[-1]["seconds"] < 6
+
+
+def test_run_rejects_files_without_an_interpreter(tmp_path):
+    with pytest.raises(runner.RunError, match="no interpreter"):
+        next(runner.run_file(tmp_path / "a.cu", tmp_path))
+
+
+def test_workspace_search_and_delete(tmp_path):
+    ws = Workspace(tmp_path)
+    ws.write("a/one.py", "alpha\nBeta gamma\n")
+    ws.write("two.txt", "beta\n")
+
+    hits = ws.search("BETA")
+    ws.delete("two.txt")
+
+    assert [(h["path"], h["line"]) for h in hits] == [("a/one.py", 2), ("two.txt", 1)]
+    assert [e["path"] for e in ws.list()] == ["a/one.py"]
+    with pytest.raises(WorkspaceError):
+        ws.delete("../outside")
+    with pytest.raises(WorkspaceError):
+        ws.search("x")
+
+
+def test_http_run_search_delete(ide):
+    _call(f"{ide}/api/file", "PUT", {"path": "say.py", "content": "print('ran ok')\n"})
+
+    status, body, _ = _call(f"{ide}/api/run", "POST", {"path": "say.py"})
+    assert status == 200 and "ran ok" in body and '"type": "exit"' in body and '"code": 0' in body
+    status, body, _ = _call(f"{ide}/api/search?q=ran%20ok")
+    assert json.loads(body)["hits"][0]["path"] == "say.py"
+    assert _call(f"{ide}/api/run", "POST", {"path": "k.ptx"})[0] == 400
+    assert _call(f"{ide}/api/file?path=say.py", "DELETE")[0] == 200
+    assert _call(f"{ide}/api/file?path=say.py")[0] == 400
+    assert json.loads(_call(f"{ide}/api/files")[1])["run"]["enabled"] is True
+
+
+def test_http_run_is_off_on_a_shared_host_unless_allowed(tmp_path):
+    (tmp_path / "say.py").write_text("print(1)\n")
+    off = build_server(0, tmp_path, None, allow_hosts=("box.ts.net",))
+    off.RequestHandlerClass.run_enabled = False  # what build_server sets for a non-local --host
+    threading.Thread(target=off.serve_forever, daemon=True).start()
+    try:
+        status, body, _ = _call(f"http://127.0.0.1:{off.server_address[1]}/api/run", "POST", {"path": "say.py"})
+    finally:
+        off.shutdown()
+        off.RequestHandlerClass.run_enabled = True
+
+    assert status == 403 and "--allow-run" in body

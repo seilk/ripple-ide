@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ripple Kernel IDE server.
+"""Ripple IDE server.
 
     python3 server.py                          # http://127.0.0.1:8787
     python3 server.py --workspace ~/kernels    # edit your own kernel folder
@@ -21,7 +21,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from ide import ripple_api
+from ide import complete, ripple_api, runner
 from ide.toolchain import CompileRequest, Toolchain, ToolchainError, validate_flags
 from ide.workspace import Workspace, WorkspaceError
 
@@ -40,11 +40,12 @@ log = logging.getLogger("ripple.server")
 
 
 class IdeHandler(SimpleHTTPRequestHandler):
-    server_version = "RippleKernelIDE/0.1"
+    server_version = "RippleIDE/0.2"
     workspace: Workspace
     toolchain: Toolchain
     mock_delay_s = 0.03
     allowed_hosts: frozenset[str] = LOCAL_HOSTS
+    run_enabled = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -111,7 +112,12 @@ class IdeHandler(SimpleHTTPRequestHandler):
             if url.path == "/api/toolchain":
                 return self._json(200, self.toolchain.info(refresh="refresh" in query).to_json())
             if url.path == "/api/files":
-                return self._json(200, {"root": str(self.workspace.root), "files": self.workspace.list()})
+                return self._json(200, {
+                    "root": str(self.workspace.root), "files": self.workspace.list(),
+                    "run": {"enabled": self.run_enabled, "extensions": sorted(runner.INTERPRETERS)},
+                })
+            if url.path == "/api/search":
+                return self._json(200, {"hits": self.workspace.search((query.get("q") or [""])[0])})
             if url.path == "/api/file":
                 path = (query.get("path") or [""])[0]
                 return self._json(200, {"path": path, "content": self.workspace.read(path)})
@@ -133,9 +139,22 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return self._json(400, {"error": str(exc)})
         return self._json(200, {"path": body["path"], "size": size})
 
+    def do_DELETE(self) -> None:
+        url = urlparse(self.path)
+        if url.path != "/api/file":
+            return self._json(404, {"error": "not found"})
+        if not self._is_local():
+            return self._json(403, {"error": "local requests only"})
+        path = (parse_qs(url.query).get("path") or [""])[0]
+        try:
+            self.workspace.delete(path)
+        except WorkspaceError as exc:
+            return self._json(400, {"error": str(exc)})
+        return self._json(200, {"deleted": path})
+
     def do_POST(self) -> None:
         route = urlparse(self.path).path
-        if route not in ("/api/compile", "/api/chat"):
+        if route not in ("/api/compile", "/api/chat", "/api/complete", "/api/run"):
             return self._json(404, {"error": "not found"})
         if not self._is_local():
             return self._json(403, {"error": "local requests only"})
@@ -144,6 +163,10 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return None
         if route == "/api/compile":
             return self._compile(body)
+        if route == "/api/complete":
+            return self._complete(body)
+        if route == "/api/run":
+            return self._run(body)
         try:
             return self._chat(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -167,6 +190,53 @@ class IdeHandler(SimpleHTTPRequestHandler):
             return self._json(200, self.toolchain.compile(request))
         except (ToolchainError, WorkspaceError, ValueError) as exc:
             return self._json(400, {"error": str(exc)})
+
+    def _run(self, body: dict) -> None:
+        if not self.run_enabled:
+            return self._json(403, {"error": "running files is off on this server; start it with --allow-run"})
+        try:
+            path = self.workspace.resolve(str(body.get("path", "")))
+            if not path.is_file():
+                raise WorkspaceError(f"no such file: {body.get('path')}")
+            events = runner.run_file(path, self.workspace.root)
+            first = next(events)  # raises RunError before any header is sent
+        except (WorkspaceError, runner.RunError) as exc:
+            return self._json(400, {"error": str(exc)})
+        self._start_sse()
+        try:
+            for event in self._chain(first, events):
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            events.close()  # kills the process if it is still running
+        return None
+
+    @staticmethod
+    def _chain(first: dict, rest):
+        yield first
+        yield from rest
+
+    def _complete(self, body: dict) -> None:
+        preset = ripple_api.PRESETS.get(str(body.get("preset", "")))
+        if preset is None:
+            return self._json(400, {"error": f"unknown preset; use one of {sorted(ripple_api.PRESETS)}"})
+        try:
+            request = complete.parse_request(body)
+        except ValueError as exc:
+            return self._json(400, {"error": str(exc)})
+        started = time.time()
+        if preset["base_url"] == "mock://":
+            text, source = complete.mock_complete(request), "idioms"
+        else:
+            try:
+                raw = ripple_api.complete_once(preset, complete.build_messages(request),
+                                               complete.MAX_TOKENS, complete.TEMPERATURE)
+            except ripple_api.UpstreamError as exc:
+                return self._json(exc.status, exc.payload)
+            text, source = complete.clean_completion(raw, request), "ripple"
+        return self._json(200, {"completion": text, "source": source, "ms": round((time.time() - started) * 1000)})
 
     def _chat(self, body: dict) -> None:
         preset = ripple_api.PRESETS.get(str(body.get("preset", "")))
@@ -204,7 +274,8 @@ class IdeHandler(SimpleHTTPRequestHandler):
 
 
 def build_server(port: int, workspace: Path, ssh_host: str | None, mock_delay_s: float = 0.03,
-                 host: str = "127.0.0.1", allow_hosts: tuple[str, ...] = ()) -> ThreadingHTTPServer:
+                 host: str = "127.0.0.1", allow_hosts: tuple[str, ...] = (),
+                 allow_run: bool = False) -> ThreadingHTTPServer:
     IdeHandler.workspace = Workspace(workspace)
     IdeHandler.allowed_hosts = LOCAL_HOSTS | {host.lower()} | {name.lower().rstrip(".") for name in allow_hosts}
     IdeHandler.toolchain = Toolchain(
@@ -213,27 +284,32 @@ def build_server(port: int, workspace: Path, ssh_host: str | None, mock_delay_s:
         python_bin=os.environ.get("KERNEL_IDE_PYTHON", "python3"),
     )
     IdeHandler.mock_delay_s = mock_delay_s
+    IdeHandler.run_enabled = allow_run or host in LOCAL_HOSTS  # code execution stays local unless asked for
     server = ThreadingHTTPServer((host, port), IdeHandler)
     server.daemon_threads = True
     return server
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ripple Kernel IDE server")
+    parser = argparse.ArgumentParser(description="Ripple IDE server")
     parser.add_argument("--port", type=int, default=8787)
-    parser.add_argument("--workspace", type=Path, default=HERE / "workspace", help="folder of kernel files")
+    parser.add_argument("--workspace", type=Path, default=HERE / "workspace", help="project folder to open")
     parser.add_argument("--ssh", default=os.environ.get("KERNEL_IDE_SSH"), help="compile on this ssh host")
     parser.add_argument("--mock-delay", type=float, default=0.03, help="seconds between mock chunks")
     parser.add_argument("--host", default="127.0.0.1", help="address to listen on (default: localhost only)")
     parser.add_argument("--allow-host", action="append", default=[], help="extra host name that may reach the API")
+    parser.add_argument("--allow-run", action="store_true",
+                        help="let the Run button execute files when --host is not localhost")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    server = build_server(args.port, args.workspace, args.ssh, args.mock_delay, args.host, tuple(args.allow_host))
+    server = build_server(args.port, args.workspace, args.ssh, args.mock_delay, args.host, tuple(args.allow_host),
+                          args.allow_run)
     info = IdeHandler.toolchain.info()
-    log.info("Ripple Kernel IDE  ->  http://%s:%d", args.host, args.port)
+    log.info("Ripple IDE  ->  http://%s:%d", args.host, args.port)
     if args.host not in LOCAL_HOSTS:
-        log.warning("listening on %s: every machine that reaches this address can edit the workspace", args.host)
+        log.warning("listening on %s: every machine that reaches this address can edit the workspace%s",
+                    args.host, " and run files in it" if args.allow_run else "")
     log.info("workspace: %s", IdeHandler.workspace.root)
     log.info("runner: %s | CUDA frontend: %s | ptxas: %s | triton: %s",
              info.runner, info.cuda_frontend or "none", "yes" if info.ptxas else "no", info.triton or "no")

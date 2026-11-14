@@ -38,6 +38,8 @@
   --radius-panel: 16px;
 
   --topbar-h: 48px;
+  --statusbar-h: 24px;
+  --src-w: 50%;
   --files-w: 224px;
   --ripple-w: 344px;
   --dock-h: 304px;

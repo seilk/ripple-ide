@@ -1,5 +1,5 @@
-// Ripple panel: chat loop with kernel tools. The model plans, the IDE runs the
-// tools, and the compile report is the model's way to check its own work.
+// Ripple panel: chat loop with tools. The model plans, the IDE runs the tools,
+// and a run or a compile report is the model's way to check its own work.
 
 import { streamChat } from './api.js';
 import { errorText, h } from './ui.js';
@@ -13,7 +13,7 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'list_files',
-      description: 'List the kernel files in the workspace.',
+      description: 'List the files in the workspace.',
       parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
     },
   },
@@ -22,6 +22,30 @@ export const TOOLS = [
     function: {
       name: 'read_file',
       description: 'Read one workspace file. Unsaved editor content wins over the file on disk.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Workspace-relative path' } },
+        required: ['path'], additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_files',
+      description: 'Search the text of all workspace files (plain text, case-insensitive). Returns path, line and text.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'Text to find, at least 2 characters' } },
+        required: ['query'], additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_file',
+      description: 'Run a .py, .js, .mjs or .sh workspace file and return its exit code and output. The user must allow each run.',
       parameters: {
         type: 'object',
         properties: { path: { type: 'string', description: 'Workspace-relative path' } },
@@ -86,8 +110,8 @@ export function createAgent({ els, getPreset, systemPrompt, tools }) {
 
   function showEmpty() {
     els.chat.replaceChildren(h('div', { class: 'chat-empty' },
-      h('b', {}, 'Ask about the open kernel'),
-      h('span', {}, 'Ripple reads the file, compiles it and checks the report before it answers. Edits arrive as diffs for you to accept')));
+      h('b', {}, 'Ask about the open file'),
+      h('span', {}, 'Ripple reads, searches, runs and compiles with tools. Edits arrive as diffs for you to accept')));
   }
 
   function setBusy(busy) {
@@ -218,10 +242,14 @@ export function createAgent({ els, getPreset, systemPrompt, tools }) {
       els.form.requestSubmit();
     }
   });
-  for (const label of ['Why is this kernel slow', 'Explain the hot loop', 'Add a header comment']) {
-    els.quick.append(h('button', { type: 'button', onclick: () => send(label) }, label));
-  }
+  /** @param {string[]} labels one-click prompts for the kind of file that is open */
+  const setQuick = (labels) => {
+    els.quick.replaceChildren(...labels.map((label) => h('button', { type: 'button', onclick: () => send(label) }, label)));
+  };
   showEmpty();
 
-  return { send, isRunning: () => running !== null };
+  /** Put text in the prompt box without sending it. */
+  const prefill = (text) => { els.prompt.value = text; els.prompt.focus(); els.prompt.setSelectionRange(text.length, text.length); };
+
+  return { send, prefill, setQuick, isRunning: () => running !== null };
 }
