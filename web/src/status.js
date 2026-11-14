@@ -11,6 +11,8 @@ import { errorText, h } from './ui.js';
 const POLL_CLOSED_MS = 5000;
 const POLL_OPEN_MS = 1000;
 const SPARK_BARS = 40;
+const POLL_RETRY_MS = 1000;
+const MISSES_BEFORE_DOWN = 2; // one late answer is not a server that is down
 const SPARK_FLOOR = 50; // tok/s that fills the graph when the server is slower than this
 
 const count = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n)));
@@ -19,6 +21,7 @@ const share = (part, whole) => (whole > 0 ? part / whole : null);
 /** @param {any} status @returns {string} */
 export function statusLine(status) {
   if (!status.ok) return 'Ripple does not answer';
+  if (status.slow) return 'Ripple busy, slow to answer';
   const m = status.metrics || {};
   if (m.running > 0) return `Ripple busy, ${m.running} running${m.waiting > 0 ? `, ${m.waiting} waiting` : ''}`;
   return 'Ripple ready';
@@ -39,7 +42,7 @@ export function statusView(status, before) {
   const kept = share(m.spec_accepted_tokens ?? 0, m.spec_draft_tokens ?? 0);
   const none = { text: '–', fill: null };
   return {
-    busy: Boolean(status.ok) && (m.running > 0 || tokps > 0),
+    busy: Boolean(status.ok) && (Boolean(status.slow) || m.running > 0 || tokps > 0),
     tokps,
     rows: {
       endpoint: { text: status.detail || 'no answer' },
@@ -54,6 +57,19 @@ export function statusView(status, before) {
         : { text: `${count(m.generation_tokens)} tokens in ${count(m.requests_done ?? 0)} requests` },
     },
   };
+}
+
+/**
+ * What to show after one more poll. A first missed poll keeps what was shown; the second in a
+ * row reads as down. With nothing shown yet, a miss is shown at once.
+ * @param {{shown: any, misses: number}} state @param {any} status
+ * @returns {{shown: any, misses: number}}
+ */
+export function afterPoll(state, status) {
+  if (status.ok) return { shown: status, misses: 0 };
+  const misses = state.misses + 1;
+  const keep = state.shown?.ok && misses < MISSES_BEFORE_DOWN;
+  return { shown: keep ? state.shown : status, misses };
 }
 
 const ROWS = [
@@ -98,6 +114,7 @@ export function createRippleStatus({ button, panel, getTarget, getSession, onCha
   let before = null;
   let last = null;
   let known = null;
+  let misses = 0;
   let timer = 0;
 
   function paint() {
@@ -128,17 +145,23 @@ export function createRippleStatus({ button, panel, getTarget, getSession, onCha
 
   async function poll() {
     clearTimeout(timer);
+    let status;
     try {
-      const status = await api.rippleStatus(getTarget());
+      status = await api.rippleStatus(getTarget());
+    } catch (error) {
+      status = { ok: false, detail: errorText(error) };
+    }
+    const next = afterPoll({ shown: last, misses }, status);
+    misses = next.misses;
+    if (next.shown === status) {
       before = last && last.at ? last : before;
       last = status;
       if (status.at && before?.at) history = [...history.slice(1), statusView(status, before).tokps];
-    } catch (error) {
-      last = { ok: false, detail: errorText(error) };
     }
     if (known !== last.ok) { onChange(last.ok, last.detail || '', known === null); known = last.ok; }
     paint();
-    timer = setTimeout(poll, panel.hidden ? POLL_CLOSED_MS : POLL_OPEN_MS);
+    const wait = misses > 0 && last.ok ? POLL_RETRY_MS : panel.hidden ? POLL_CLOSED_MS : POLL_OPEN_MS;
+    timer = setTimeout(poll, wait);
   }
 
   const close = () => { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); };
@@ -153,6 +176,6 @@ export function createRippleStatus({ button, panel, getTarget, getSession, onCha
   });
   poll();
   return {
-    refresh: () => { before = null; last = null; history = new Array(SPARK_BARS).fill(0); return poll(); },
+    refresh: () => { before = null; last = null; misses = 0; history = new Array(SPARK_BARS).fill(0); return poll(); },
   };
 }

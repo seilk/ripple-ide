@@ -953,3 +953,60 @@ def test_a_stream_cut_short_does_not_put_its_connection_back():
         pool.close()
 
     assert pool.opened == 2  # the half-read one was dropped, the fully read one was used again
+
+
+def _slow_status_upstream():
+    """A stand-in Ripple that streams an answer without end and is slow to answer GET requests."""
+    import http.server
+    release = threading.Event()
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            release.wait(2)  # longer than the status timeout the test sets
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"data: {}\n\n")
+            self.wfile.flush()
+            release.wait(5)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, release
+
+
+def test_a_slow_status_answer_during_our_own_stream_reads_as_busy_not_as_down(monkeypatch):
+    from ide import ripple_api
+    from ide.upstream import POOL
+    monkeypatch.setattr(ripple_api, "STATUS_TIMEOUT_S", 0.3)
+    upstream, release = _slow_status_upstream()
+    base = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
+    preset = {"base_url": base, "model": "ripple", "key_env": []}
+    try:
+        idle = ripple_api.check(preset)
+        stream = POOL.request("POST", base + "/chat/completions", b"{}", {"Content-Type": "application/json"})
+        try:
+            during = ripple_api.check(preset)
+        finally:
+            stream.close()
+        after = ripple_api.check(preset)
+    finally:
+        release.set()
+        upstream.shutdown()
+
+    assert idle["ok"] is False and "timed out" in idle["detail"]  # nothing of ours runs: it does not answer
+    assert during["ok"] is True and during["slow"] is True and "busy" in during["detail"]
+    assert after["ok"] is False  # the stream ended, so a timeout means down again

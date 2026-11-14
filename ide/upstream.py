@@ -52,6 +52,7 @@ class Response:
 class Pool:
     def __init__(self) -> None:
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+        self._active: dict[tuple[str, str, int], int] = {}
         self._lock = threading.Lock()
         self.opened = 0  # connections made so far
 
@@ -60,7 +61,19 @@ class Pool:
             idle = self._idle.get(key)
             return idle.pop() if idle else None
 
+    @staticmethod
+    def _key(url: str) -> tuple[str, str, int]:
+        parts = urlsplit(url)
+        return (parts.scheme, parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80))
+
+    def active(self, url: str) -> int:
+        """Answers from the server of `url` that are being read right now (a stream in flight counts)."""
+        with self._lock:
+            return self._active.get(self._key(url), 0)
+
     def _give(self, key: tuple[str, str, int], connection: http.client.HTTPConnection, reusable: bool) -> None:
+        with self._lock:
+            self._active[key] = max(0, self._active.get(key, 0) - 1)
         if reusable:
             with self._lock:
                 idle = self._idle.setdefault(key, [])
@@ -73,7 +86,7 @@ class Pool:
                 timeout: float = 60.0) -> Response:
         parts = urlsplit(url)
         secure = parts.scheme == "https"
-        key = (parts.scheme, parts.hostname or "", parts.port or (443 if secure else 80))
+        key = self._key(url)
         target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         connection = self._take(key)
         kept = connection is not None
@@ -100,6 +113,8 @@ class Pool:
                 connection.close()
                 raise
             used = connection
+            with self._lock:
+                self._active[key] = self._active.get(key, 0) + 1
             return Response(raw, lambda reusable: self._give(key, used, reusable))
 
     def close(self) -> None:

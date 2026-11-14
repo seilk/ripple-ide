@@ -94,3 +94,17 @@ test('status view: busy from token flow, shares as fills, dashes when the server
   assert.deepEqual([mock.rows.requests.text, mock.rows.cache.text, mock.rows.throughput.text], ['\u2013', '\u2013', '\u2013']);
   assert.equal(statusView({ ok: false, detail: 'no route' }, null).rows.endpoint.text, 'no route');
 });
+
+test('status: a slow server during an answer reads as busy, and one missed poll does not read as down', async () => {
+  const { statusLine, statusView, afterPoll } = await import('../web/src/status.js');
+  const slow = { ok: true, slow: true, detail: 'ripple at http://127.0.0.1:8000/v1 is busy and slow to answer', metrics: {} };
+  assert.equal(statusLine(slow), 'Ripple busy, slow to answer');
+  assert.equal(statusView(slow, null).busy, true);
+
+  const ok = { ok: true, detail: 'ripple', metrics: {} };
+  const miss = { ok: false, detail: 'timed out' };
+  assert.deepEqual(afterPoll({ shown: null, misses: 0 }, miss), { shown: miss, misses: 1 });   // first poll ever: say it at once
+  assert.deepEqual(afterPoll({ shown: ok, misses: 0 }, miss), { shown: ok, misses: 1 });       // one miss: keep what was shown
+  assert.deepEqual(afterPoll({ shown: ok, misses: 1 }, miss), { shown: miss, misses: 2 });     // the second in a row: down
+  assert.deepEqual(afterPoll({ shown: miss, misses: 2 }, ok), { shown: ok, misses: 0 });       // an answer: up again at once
+});

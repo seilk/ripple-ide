@@ -147,6 +147,13 @@ Three later changes, each measured before and after on the same server:
 `tools/bench-latency.py`, `tools/bench-agent-cache.py`, `tools/bench-agent-make.mjs` and
 `tools/bench-agent-reads.mjs` produce these numbers.
 
+A long file write by the agent made the Ripple server stop answering for 10 s and
+more ("does not answer (timed out)"). The cause was in vLLM's Ripple parser, not in
+the IDE; `tools/vllm-patch` fixes it (9.61 s of parsing to 0.094 s for a 5,231-token
+call), and [docs/RUNTIME.md](docs/RUNTIME.md) has the numbers. The status check
+also reads a slow answer during our own stream as busy, and takes two missed
+polls in a row before it says the server is down.
+
 What the IDE does for speed: starts the model's reply for it so it answers
 without reasoning; stops at the end of the line; holds the answer to a line
 pattern so a half-typed word is finished; sends a context window whose start

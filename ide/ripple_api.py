@@ -291,6 +291,11 @@ def check(preset: dict) -> dict:
     except _StatusError as exc:
         return {"ok": False, "detail": f"{preset['base_url']} answered {exc.code}"}
     except (OSError, http.client.HTTPException) as exc:
+        if isinstance(exc, TimeoutError) and POOL.active(base) > 0:
+            # The server is sending us an answer at this moment, so it is up. One process serves
+            # the API, and a long answer can keep it from a status request for seconds.
+            return {"ok": True, "slow": True, "model": preset["model"], "metrics": {},
+                    "detail": f"{preset['model']} at {preset['base_url']} is busy and slow to answer"}
         reason = getattr(exc, "reason", None) or exc or type(exc).__name__
         return {"ok": False, "detail": f"{preset['base_url']} does not answer ({reason})"}
 

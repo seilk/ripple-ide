@@ -50,6 +50,33 @@ The last flag turns on DFlash2 speculative decoding: about 230 to 310 tokens per
 second against 77 without it. The first start with it builds a flashinfer module
 for about five minutes; later starts reuse it.
 
+### Parser patch for long tool calls
+
+vLLM 0.34.0rc1.dev156 scans the whole tool call again for every streamed piece of
+it (`vllm/parser/ripple.py` has no `arg_value_extender`). The cost grows with the
+square of the length. When the agent writes a long file, the API server process
+does only that for seconds, and it answers nothing else: status checks and
+suggestions time out. The IDE showed this as "does not answer (timed out)".
+
+`tools/vllm-patch` adds the missing function. Apply it once after the install,
+then start `vllm serve`:
+
+```bash
+python tools/vllm-patch/apply.py            # --check to look, --revert to undo
+python tools/vllm-patch/check.py <snapshot> # 400 streams, same output as the original parser
+```
+
+| On the server, while one `write_file` call streams | Original | Patched |
+|---|---|---|
+| Parse time, 5,231-token call (`check.py`) | 9.61 s | 0.094 s |
+| Parse time, 10,431-token call | 37.89 s | 0.448 s |
+| Longest wait of a status request (`tools/bench-server-stall.py`, 6,000 tokens) | 12.05 s | under 0.01 s |
+| API server CPU during the answer | 66 % of one core | 2 % |
+
+Through the IDE with the patch (`tools/bench-busy.py`): during one 105 s answer
+with 99,000 characters of tool-call arguments, 335 status checks took 0.14 s at
+most and 335 suggestions 1.01 s at most.
+
 From the machine that runs the IDE:
 
 ```bash
