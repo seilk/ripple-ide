@@ -385,6 +385,11 @@ def mock_plan(messages: list[dict]) -> tuple[str, str, tuple[str, dict] | None]:
 
     if active is None or active == "(none)":
         return ("No file is open.", "Open a kernel file first, then ask again.", None)
+    if last.get("role") == "user" and re.search(r"\b(make|create|build)\b.*\bhtml\b", asked):
+        page = ("<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>Review</title>\n</head>\n"
+                "<body>\n  <h1>Review</h1>\n  <p>Written by the offline mock.</p>\n</body>\n</html>\n")
+        return ("A new page belongs next to the other one, in site.", "Creating the page.\n",
+                ("write_file", {"path": "site/review.html", "content": page}))
     if last.get("role") == "user":
         return (f"The request is about {active}. Read it before anything else.",
                 "Reading the kernel.\n", ("read_file", {"path": active}))
@@ -408,6 +413,8 @@ def mock_plan(messages: list[dict]) -> tuple[str, str, tuple[str, dict] | None]:
             return ("", f"The run finished. Output:\n{str(last.get('content', ''))[:400]}", None)
         if previous == "compile_kernel":
             return ("", _summarize_report(str(last.get("content", ""))), None)
+        if previous == "write_file" and '"created"' in str(last.get("content", "")):
+            return ("", "Created site/review.html. It is open, with its preview.", None)
         if previous == "write_file":
             rejected = '"rejected"' in str(last.get("content", ""))
             return ("", f"You rejected the change, so {active} is unchanged." if rejected

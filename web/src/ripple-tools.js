@@ -15,11 +15,21 @@ const MAX_RUN_OUTPUT_CHARS = 8000;
  *   run: (path: string) => Promise<{code: number, output: string, seconds: number}>,
  *   compile: (path: string) => Promise<{res: any, analysis: any}>,
  *   baselineOf: (path: string) => {fns: Record<string, any>}|undefined,
+ *   autoApply: () => boolean,
  *   confirmWrite: (path: string, before: string, after: string) => Promise<boolean>,
  *   applyWrite: (path: string, content: string) => Promise<void>,
+ *   recordChange: (change: {path: string, before: string, after: string, existed: boolean}) => string,
  * }} ide
  */
 export function createRippleTools(ide) {
+  /** Ask first, or apply at once and keep the old text so the user can review and undo. */
+  async function change(path, before, after, existed) {
+    const auto = ide.autoApply();
+    if (!auto && !(await ide.confirmWrite(path, before, after))) return null;
+    await ide.applyWrite(path, after);
+    return auto ? ide.recordChange({ path, before, after, existed }) : '';
+  }
+
   return {
     list_files: () => ide.listFiles(),
 
@@ -63,37 +73,39 @@ export function createRippleTools(ide) {
       if (first === -1) return { error: 'old_text was not found in the file. Read the file and copy the text exactly.' };
       if (before.indexOf(oldText, first + 1) !== -1) return { error: 'old_text occurs more than once. Include more lines around it.' };
       const after = before.slice(0, first) + newText + before.slice(first + oldText.length);
-      if (!(await ide.confirmWrite(path, before, after))) {
-        return { rejected: true, message: 'The user rejected this change.' };
-      }
-      await ide.applyWrite(path, after);
-      return { edited: path, replaced_chars: oldText.length, new_chars: newText.length };
+      const changeId = await change(path, before, after, true);
+      if (changeId === null) return { rejected: true, message: 'The user rejected this change.' };
+      return { edited: path, replaced_chars: oldText.length, new_chars: newText.length, ...(changeId ? { change_id: changeId } : {}) };
     },
 
     write_file: async ({ path, content }) => {
       if (typeof path !== 'string' || !path) throw new Error('path is required');
       if (typeof content !== 'string') throw new Error('content must be a string');
       const files = await ide.listFiles();
-      const before = files.some((file) => file.path === path) ? await ide.readText(path) : '';
-      if (!(await ide.confirmWrite(path, before, content))) {
-        return { rejected: true, message: 'The user rejected this change.' };
-      }
-      await ide.applyWrite(path, content);
-      return { written: path, bytes: content.length };
+      const existed = files.some((file) => file.path === path);
+      const before = existed ? await ide.readText(path) : '';
+      const changeId = await change(path, before, content, existed);
+      if (changeId === null) return { rejected: true, message: 'The user rejected this change.' };
+      return { [existed ? 'written' : 'created']: path, bytes: content.length, ...(changeId ? { change_id: changeId } : {}) };
     },
   };
 }
 
-/** @param {{active: string|null, kernel: string|null, toolchain: any, arch: string, canRun: boolean}} session */
-export function systemPrompt({ active, kernel, toolchain, arch, canRun }) {
+/** @param {{active: string|null, kernel: string|null, toolchain: any, arch: string, canRun: boolean, autoApply: boolean}} session */
+export function systemPrompt({ active, kernel, toolchain, arch, canRun, autoApply }) {
   const tc = toolchain || {};
   const lines = [
     'You are Ripple, the coding model inside Ripple IDE. You work on the files of the open project with tools.',
     'Read before you edit. Use search_files to find things. Check your work: run the file or compile the kernel '
       + 'after an edit, and report what the tool showed. Do not claim a result that no tool showed.',
+    'When the user asks you to make, build or fix something, do it with the tools: create the file with write_file or '
+      + 'change it with edit_file. Do not paste the code into the chat and stop there. Look at the files near it first, '
+      + 'so a new file sits in the right folder and matches what is there.',
     'To change an existing file use edit_file: it replaces one exact piece of text and is much faster than write_file, '
-      + 'which sends the whole file again. Use write_file for new files only. The user reviews a diff of every change. '
-      + 'Keep edits small and explain each one in one line.',
+      + 'which sends the whole file again. Use write_file for new files only. Explain each change in one line.',
+    autoApply
+      ? 'Changes are applied at once, with no question to the user. The user can review and undo each one afterwards.'
+      : 'The user sees a diff of every change and can reject it.',
     canRun ? 'run_file runs a .py, .js, .mjs or .sh file after the user allows it.' : 'run_file is off on this server.',
     `Active file: ${active || '(none)'}`,
   ];

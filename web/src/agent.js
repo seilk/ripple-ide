@@ -117,11 +117,12 @@ function formatTokens(n) {
  *         chatSelect: HTMLSelectElement, chatNew: HTMLElement, chatDelete: HTMLElement},
  *   getRequest: () => {target: object, options: object},
  *   onPerf?: (perf: {ttft: number, tokps: number}) => void,
+ *   onReview?: (changeId: string, row: HTMLElement) => void,
  *   systemPrompt: () => string,
  *   tools: Record<string, (args: any) => Promise<unknown>>,
  * }} deps
  */
-export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
+export function createAgent({ els, getRequest, onPerf, onReview, systemPrompt, tools }) {
   /** @type {Array<{id: string, title: string, history: Array<any>}>} chats, newest first */
   let chats = [];
   try {
@@ -241,6 +242,11 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
       const rejected = result && typeof result === 'object' && /** @type {any} */ (result).rejected;
       row.dataset.state = rejected ? 'rejected' : 'ok';
       state.textContent = rejected ? 'Rejected' : 'Done';
+      const changeId = result && typeof result === 'object' && /** @type {any} */ (result).change_id;
+      if (changeId && onReview) {
+        state.textContent = 'Applied';
+        row.append(h('button', { class: 'quiet', type: 'button', title: 'See this change, undo it if you like', onclick: () => onReview(changeId, row) }, 'Review'));
+      }
       const text = typeof result === 'string' ? result : JSON.stringify(result);
       return text.length > MAX_TOOL_RESULT_CHARS ? `${text.slice(0, MAX_TOOL_RESULT_CHARS)}\n[truncated]` : text;
     } catch (error) {
@@ -254,7 +260,9 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
     const say = h('div', { class: 'say' });
     const thinkText = h('p', {});
     const think = h('details', { class: 'think', hidden: true }, h('summary', {}, 'Reasoning'), thinkText);
-    block.append(think, say);
+    // A file can take seconds to write. This line shows that it is on its way.
+    const writing = h('div', { class: 'tool', 'data-state': 'run', hidden: true }, h('b', {}), h('span', { class: 'arg' }), h('span', { class: 'state' }, 'Writing'));
+    block.append(think, say, writing);
 
     const message = { content: '', reasoning: '', toolCalls: /** @type {any[]} */ ([]) };
     const started = performance.now();
@@ -277,6 +285,9 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
           if (part.id) slot.id = part.id;
           if (part.function?.name) slot.function.name += part.function.name;
           if (part.function?.arguments) slot.function.arguments += part.function.arguments;
+          writing.hidden = false;
+          writing.firstElementChild.textContent = slot.function.name;
+          writing.children[1].textContent = `${formatTokens(slot.function.arguments.length)} characters`;
         }
         scroll();
       }, signal);
@@ -292,6 +303,7 @@ export function createAgent({ els, getRequest, onPerf, systemPrompt, tools }) {
     }
     if (usage?.prompt_tokens != null) els.ctx.textContent = `${formatTokens(usage.prompt_tokens)} of ${formatTokens(CONTEXT_TOKENS)} tokens`;
     if (!message.content) say.remove();
+    writing.remove();
 
     const calls = message.toolCalls.filter(Boolean);
     // Ripple's chat template puts reasoning_content back in front of the answer, so a

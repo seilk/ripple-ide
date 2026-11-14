@@ -29,7 +29,7 @@ const PREVIEW_DELAY_MS = 300;
 const PREVIEW_PAGE = ['html', 'htm'];
 const PREVIEW_PART = ['css', 'js', 'mjs', 'svg', 'json'];
 const COMPILE_LABEL = { cuda: 'Compile to PTX', ptx: 'Check PTX', triton: 'Run for PTX' };
-const PREF_KEY = { live: 'live', suggest: 'suggest', showDebugLines: 'debug-lines' };
+const PREF_KEY = { live: 'live', suggest: 'suggest', showDebugLines: 'debug-lines', autoApply: 'auto-apply' };
 const MODES = { general: 'General', kernel: 'Kernel', lab: 'Ripple lab' };
 const DEBUG_LINE_RE = /^\s*(?:\.loc\b|\$L__(?:tmp|func_begin|func_end)\d+:)/; // line info, not instructions
 const QUICK_PROMPTS = {
@@ -52,6 +52,8 @@ const state = {
   previewVersion: 0,
   live: prefs.get('live', 'on') === 'on',
   suggest: prefs.get('suggest', 'on') === 'on',
+  autoApply: prefs.get('auto-apply', 'on') === 'on',
+  /** @type {Map<string, {path: string, before: string, after: string, existed: boolean}>} changes Ripple applied without asking */ changes: new Map(),
   showDebugLines: prefs.get('debug-lines', 'off') === 'on',
 };
 
@@ -537,7 +539,7 @@ async function loadLab() {
   });
 }
 
-/** @param {HTMLElement} button @param {'live'|'suggest'|'showDebugLines'} key @param {() => void} onChange */
+/** @param {HTMLElement} button @param {'live'|'suggest'|'showDebugLines'|'autoApply'} key @param {() => void} onChange */
 function bindToggle(button, key, onChange) {
   const paint = () => button.setAttribute('aria-pressed', String(state[key]));
   button.addEventListener('click', () => {
@@ -560,11 +562,18 @@ function showSuggestState({ phase, source, ms, message }) {
 
 // ------------------------------------------------------------------ dialogs and Ripple
 
-function askForWrite(path, before, after) {
+/**
+ * Show a diff and wait for the answer. By default it asks before a change; with `labels`
+ * it shows a change that is already applied, to keep or to undo.
+ */
+function askForWrite(path, before, after, labels = { title: 'Review change', accept: 'Apply', reject: 'Reject' }) {
   return new Promise((resolve) => {
     const original = monaco.editor.createModel(before, languageFor(path));
     const modified = monaco.editor.createModel(after, languageFor(path));
     els.diffPath.textContent = path;
+    $('diff-title').textContent = labels.title;
+    $('diff-accept').textContent = labels.accept;
+    $('diff-reject').textContent = labels.reject;
     diffEditor.setModel({ original, modified });
     const finish = (accepted) => {
       els.diffDialog.close();
@@ -607,6 +616,26 @@ async function applyWrite(path, content) {
   entry.savedVersion = entry.model.getAlternativeVersionId();
   setActive(path);
   if (kindOf(path) === 'cuda' && !state.live) compile(path).catch((error) => setStatus(errorText(error), 'error'));
+}
+
+/** Show a change that Ripple applied without asking. Undo puts the old text back, or removes a new file. */
+async function reviewChange(id, row) {
+  const change = state.changes.get(id);
+  if (!change) return;
+  const keep = await askForWrite(change.path, change.before, change.after,
+    { title: change.existed ? 'Applied change' : 'New file', accept: 'Keep', reject: change.existed ? 'Undo' : 'Delete file' });
+  if (keep) return;
+  try {
+    if (change.existed) await applyWrite(change.path, change.before);
+    else { await api.remove(change.path); closeFile(change.path, { force: true }); await refreshFiles(); }
+    state.changes.delete(id);
+    row.dataset.state = 'undone';
+    row.querySelector('.state').textContent = 'Undone';
+    row.querySelector('.quiet')?.remove();
+    setStatus(`Undid the change to ${change.path}`, 'ok');
+  } catch (error) {
+    setStatus(errorText(error), 'error');
+  }
 }
 
 function askAboutSelection() {
@@ -696,6 +725,7 @@ function setupChrome() {
   bindToggle(els.toggleLive, 'live', rebuild);
   bindToggle(els.toggleSuggest, 'suggest', () => showSuggestState({ phase: 'idle' }));
   bindToggle(els.toggleDebug, 'showDebugLines', applyDebugLineFilter);
+  bindToggle($('toggle-auto'), 'autoApply', () => {});
 
   const width = (id) => $(id).getBoundingClientRect().width;
   const height = (id) => $(id).getBoundingClientRect().height;
@@ -724,8 +754,10 @@ function setupRipple() {
     run: runFile,
     compile,
     baselineOf: (path) => state.baselines.get(path),
+    autoApply: () => state.autoApply,
     confirmWrite: askForWrite,
     applyWrite,
+    recordChange: (change) => { const id = `ch${state.changes.size + 1}-${Date.now().toString(36)}`; state.changes.set(id, change); return id; },
   });
   agent = createAgent({
     els: {
@@ -736,9 +768,10 @@ function setupRipple() {
     },
     getRequest: () => ({ target: lab.target(), options: lab.chatOptions() }),
     onPerf: (perf) => lab.noteChat(perf),
+    onReview: reviewChange,
     systemPrompt: () => [systemPrompt({
       active: state.active, kernel: state.active ? kindOf(state.active) : null,
-      toolchain: state.toolchain, arch: els.arch.value, canRun: state.run.enabled,
+      toolchain: state.toolchain, arch: els.arch.value, canRun: state.run.enabled, autoApply: state.autoApply,
     }), lab.chatInstruction()].filter(Boolean).join('\n'),
     tools,
   });

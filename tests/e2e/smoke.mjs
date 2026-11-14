@@ -326,6 +326,8 @@ try {
   });
 
   await step('a Ripple edit needs approval, then lands in the editor and on disk', async () => {
+    await page.locator('#toggle-auto').click(); // ask before each change
+    assert.equal(await page.locator('#toggle-auto').getAttribute('aria-pressed'), 'false');
     await page.locator('#quick button', { hasText: 'Add a header comment' }).click();
     await page.waitForSelector('#diff-dialog[open]');
     await page.screenshot({ path: join(SHOTS, 'diff-1440.png') });
@@ -345,6 +347,43 @@ try {
     await page.locator('#diff-reject').click();
     await chatHas('You rejected the change');
     assert.equal(await modelText('rowsum.cu'), before);
+  });
+
+  await step('with auto-apply, Ripple makes a file with no question, and Review can take it back', async () => {
+    await page.waitForFunction(() => document.querySelector('#send').textContent === 'Send');
+    await page.locator('#toggle-auto').click();
+    assert.equal(await page.locator('#toggle-auto').getAttribute('aria-pressed'), 'true');
+    await page.locator('#prompt').fill('Can you make a html file for reviewing Ripple IDE?');
+    await page.keyboard.press('Enter');
+    await chatHas('Created site/review\\.html');
+    assert.equal(await page.locator('#diff-dialog[open]').count(), 0); // nothing to approve
+    assert.equal(await activeTab(), 'site/review.html');
+    assert.equal(existsSync(join(workspace, 'site/review.html')), true);
+    await page.frameLocator('#preview-frame').locator('h1', { hasText: 'Review' }).waitFor(); // the new page shows at once
+    const row = page.locator('#chat .tool', { hasText: 'write_file' }).last();
+    assert.equal(await row.locator('.state').innerText(), 'Applied');
+    await row.locator('.quiet').click();
+    await page.waitForSelector('#diff-dialog[open]');
+    assert.equal(await page.locator('#diff-title').innerText(), 'New file');
+    assert.equal(await page.locator('#diff-reject').innerText(), 'Delete file');
+    await page.locator('#diff-reject').click();
+    await page.waitForFunction(() => !document.querySelector('#file-list').textContent.includes('review.html'));
+    assert.equal(existsSync(join(workspace, 'site/review.html')), false);
+    assert.equal(await row.getAttribute('data-state'), 'undone');
+
+    await openFromTree('hello.py'); // an edit to an existing file is undone by putting the old text back
+    const before = await modelText('hello.py');
+    await page.locator('#prompt').fill('Add a header comment');
+    await page.keyboard.press('Enter');
+    await chatHas('The change is in hello\\.py');
+    assert.match(await modelText('hello.py'), /^# Reviewed by Ripple/);
+    const edit = page.locator('#chat .tool', { hasText: 'write_file' }).last();
+    await edit.locator('.quiet').click();
+    await page.waitForSelector('#diff-dialog[open]');
+    assert.equal(await page.locator('#diff-reject').innerText(), 'Undo');
+    await page.locator('#diff-reject').click();
+    await page.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Undid'));
+    assert.equal(await modelText('hello.py'), before);
   });
 
   await step('chats: a new one starts empty, the old one comes back, both survive a reload', async () => {

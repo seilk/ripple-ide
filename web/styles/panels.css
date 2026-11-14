@@ -149,6 +149,10 @@
 .quick button:hover { background: var(--surface-raised); color: var(--text); }
 
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); align-items: end; padding: var(--space-3) var(--space-4) var(--space-4); border-top: 1px solid var(--hairline); }
+.composer .toggle { grid-column: 1 / -1; justify-self: start; }
+.tool .quiet { flex: none; }
+.tool[data-state="undone"] .state { color: var(--text-3); }
+.tool[data-state="undone"] b { text-decoration: line-through; }
 .composer textarea { resize: none; padding: var(--space-2) var(--space-3); background: var(--surface-raised); border: 1px solid var(--hairline); border-radius: var(--radius-control); line-height: 20px; transition: border-color var(--duration) var(--ease); }
 .composer textarea::placeholder { color: var(--text-3); }
 .composer textarea:focus { border-color: var(--hairline-strong); outline: none; }
