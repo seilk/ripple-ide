@@ -42,8 +42,13 @@ uv pip install -U vllm --pre \
 vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 --host 127.0.0.1 --port 8000 \
   --served-model-name ricursiveAI/Ripple-65B-Preview-NVFP4 ripple \
   --tensor-parallel-size 1 --max-model-len 262144 \
-  --reasoning-parser ripple --enable-auto-tool-choice --tool-call-parser ripple
+  --reasoning-parser ripple --enable-auto-tool-choice --tool-call-parser ripple \
+  --speculative-config '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}'
 ```
+
+The last flag turns on DFlash2 speculative decoding: about 230 to 310 tokens per
+second against 77 without it. The first start with it builds a flashinfer module
+for about five minutes; later starts reuse it.
 
 From the machine that runs the IDE:
 

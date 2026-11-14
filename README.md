@@ -114,14 +114,21 @@ Measured with Ripple-65B Preview (NVFP4) on vLLM, one B200, the IDE on another
 machine behind an SSH forward (13 ms round trip). See `ide/complete.py` for how
 a chat model is made to act as a completion model.
 
-| What | Result |
-|------|--------|
-| Suggestion, lab cases | 14 of 14 pass, median 116 ms, 95th percentile 644 ms |
-| Same, first attempt (plain instruction) | empty answers: the model reasoned first and used up its tokens |
-| Same, with an empty think block only | 7 of 12, median 1106 ms |
-| Suggestion while typing in a 35k-character file | median 173 ms; the prefix cache halves it (124 ms against 228 ms for the same 2000-token context) |
-| Inline edit of a 2-line function into 5 lines | 0.71 s, first text after 95 ms |
-| Agent: read a kernel, compile, fix a double literal, compile again | 8.2 s, first token 87 ms |
+| What | Plain | With DFlash2 speculative decoding |
+|------|-------|-----------------------------------|
+| Generation speed | 77 tok/s | 230 to 310 tok/s |
+| Suggestion, lab cases, median | 116 ms (14 of 14 pass) | 76 ms (13 of 14 pass) |
+| Suggestion, lab cases, 95th percentile | 644 ms | 153 ms |
+| Suggestion while typing in a 35k-character file | median 173 ms | not measured |
+| Inline edit of a 2-line function into 5 lines | 0.71 s, first text after 95 ms | not measured |
+| Agent: read a kernel, compile, fix a double literal, compile again | 8.2 s | not measured |
+
+Before the request was shaped for a chat model, the same suggestion cases gave
+empty answers (the model reasoned first and used up its tokens), then 7 of 12
+at a median of 1106 ms with reasoning switched off only. The prefix cache halves
+latency in a large file (124 ms against 228 ms for the same 2000-token context).
+Suggestions slow down a lot while a chat answer is being generated on the same
+GPU: one run measured 0.4 to 3.6 s per suggestion during chat traffic.
 
 What the IDE does for speed: starts the model's reply for it so it answers
 without reasoning; stops at the end of the line; holds the answer to a line
