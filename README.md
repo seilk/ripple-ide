@@ -5,6 +5,12 @@ type, and an agent in the side panel that reads, searches, edits, runs and
 checks its own work. Ripple runs on your own machine, so the IDE also lets you
 change how it is used and measure the result.
 
+| Suggests code while you type (Tab) | Rewrites the code you select (Cmd K) | An agent that edits, runs and checks |
+|---|---|---|
+| ![A suggestion writes the body of a function](docs/media/suggest.gif) | ![An inline edit of a selected function](docs/media/edit.gif) | ![The agent fixes a file and runs it](docs/media/agent.gif) |
+
+Recorded on a real Ripple-65B with `tools/record-demos.mjs`.
+
 ## Modes
 
 One IDE, three modes. `⇧⌘P` opens the command list; type `Mode`. The open
